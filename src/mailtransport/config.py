@@ -46,9 +46,9 @@ def _env_bool(name: str, default: bool) -> bool:
 def _resolve_secret(direct_env: str, secret_ref_env: str) -> str | None:
     """値を環境変数から直接、なければ Secret Manager のリソース名経由で取得する.
 
-    Cloud Run の ``--set-secrets`` を使うと Secret Manager の値が環境変数として
-    注入されるため通常は direct_env だけで足りる。ローカル実行や、シークレットを
-    実行時に取得したい場合のために ``*_SECRET`` によるリソース名指定も許可する。
+    VM 上では ``*_SECRET`` にシークレット名を渡し、値は実行時に VM の
+    サービスアカウントで取得する (ディスクに秘密情報を置かないため)。
+    ローカル実行では direct_env に値を直接入れる。
     """
     value = _env(direct_env)
     if value:
@@ -92,9 +92,6 @@ class Config:
     gmail_user_id: str
     routes: tuple[Route, ...]
     project_id: str | None
-    firestore_database: str
-    state_collection: str
-    seen_collection: str
     seen_retention_days: int
     max_messages_per_run: int
     max_message_bytes: int
@@ -205,8 +202,8 @@ def load_config() -> Config:
         raise ValueError("INITIAL_IMPORT は 'none' か 'all' を指定してください")
 
     state_backend = (_env("STATE_BACKEND", "sqlite") or "sqlite").strip().lower()
-    if state_backend not in {"sqlite", "firestore", "memory"}:
-        raise ValueError("STATE_BACKEND は 'sqlite' / 'firestore' / 'memory' のいずれかです")
+    if state_backend not in {"sqlite", "memory"}:
+        raise ValueError("STATE_BACKEND は 'sqlite' か 'memory' を指定してください")
 
     return Config(
         icloud_username=username,
@@ -218,15 +215,12 @@ def load_config() -> Config:
         gmail_user_id=_env("GMAIL_USER_ID", "me"),
         routes=_parse_routes(),
         project_id=_env("GOOGLE_CLOUD_PROJECT") or _env("GCP_PROJECT"),
-        firestore_database=_env("FIRESTORE_DATABASE", "(default)"),
-        state_collection=_env("STATE_COLLECTION", "mail_transport_state"),
-        seen_collection=_env("SEEN_COLLECTION", "mail_transport_seen"),
         seen_retention_days=_env_int("SEEN_RETENTION_DAYS", 30),
         max_messages_per_run=_env_int("MAX_MESSAGES_PER_RUN", 40),
         # iCloud の送受信上限は 20MB 前後。Gmail insert は 50MB まで受け付ける。
         max_message_bytes=_env_int("MAX_MESSAGE_BYTES", 35 * 1024 * 1024),
         lock_ttl_seconds=_env_int("LOCK_TTL_SECONDS", 540),
-        # Cloud Run のリクエストタイムアウトより短く切り上げて途中終了させる
+        # 1 回の同期が長引いても、次の新着通知に反応できるよう打ち切る
         run_budget_seconds=_env_int("RUN_BUDGET_SECONDS", 240),
         initial_import=initial_import,
         dry_run=_env_bool("DRY_RUN", False),

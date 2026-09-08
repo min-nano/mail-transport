@@ -64,7 +64,7 @@ class SyncReport:
 
 
 def state_key(username: str, mailbox: str) -> str:
-    """Firestore のドキュメント ID として安全なキーを作る."""
+    """状態ストアのキーとして安全な文字列を作る."""
     digest = hashlib.sha256(f"{username}\x00{mailbox}".encode()).hexdigest()[:16]
     readable = _UNSAFE_DOC_ID.sub("_", f"{username}__{mailbox}")[:100]
     return f"{readable}__{digest}"
@@ -99,8 +99,9 @@ def sync_once(
 ) -> SyncReport:
     """1 回分の同期を実行する.
 
-    Cloud Scheduler から短い間隔で呼ばれる前提で、1 回あたりの処理量と実行時間に
-    上限を設けている。処理しきれなかった分は次回の実行で継続される。
+    1 回あたりの処理量と実行時間に上限を設け、大量のメールが溜まっていても
+    ひとつの同期に居座らないようにしている。処理しきれなかった分は次の契機で
+    継続される (``SyncReport.has_more`` が立つ)。
     """
     started = time.monotonic()
     deadline = started + config.run_budget_seconds

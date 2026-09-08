@@ -26,16 +26,16 @@ fi
 
 echo "==> アプリを ${APP_DIR} に配置します"
 install -d -m 0755 "${APP_DIR}"
-rm -rf "${APP_DIR}/src" "${APP_DIR}/pyproject.toml" "${APP_DIR}/requirements-vm.txt"
+rm -rf "${APP_DIR}/src" "${APP_DIR}/pyproject.toml" "${APP_DIR}/requirements.txt"
 cp -r "${SRC_DIR}/src" "${APP_DIR}/src"
-cp "${SRC_DIR}/pyproject.toml" "${SRC_DIR}/requirements-vm.txt" "${APP_DIR}/"
+cp "${SRC_DIR}/pyproject.toml" "${SRC_DIR}/requirements.txt" "${APP_DIR}/"
 
 echo "==> 仮想環境を用意します"
 if [[ ! -x "${APP_DIR}/venv/bin/python" ]]; then
   python3 -m venv "${APP_DIR}/venv"
 fi
 "${APP_DIR}/venv/bin/pip" install --quiet --upgrade pip
-"${APP_DIR}/venv/bin/pip" install --quiet -r "${APP_DIR}/requirements-vm.txt"
+"${APP_DIR}/venv/bin/pip" install --quiet -r "${APP_DIR}/requirements.txt"
 "${APP_DIR}/venv/bin/pip" install --quiet --no-deps "${APP_DIR}"
 rm -rf "${APP_DIR}/build"
 

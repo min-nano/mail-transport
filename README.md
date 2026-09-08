@@ -4,7 +4,7 @@ iCloud のメールを **SMTP を経由せず** Gmail に複製します。
 iCloud からは **IMAP** で生のメッセージを取り出し、Gmail へは **Gmail API の
 `users.messages.insert`** で直接書き込みます。
 
-推奨構成は **GCE の e2-micro を常時起動し、IMAP IDLE で新着を待ち受ける**方式です。
+**GCE の e2-micro を常時起動し、IMAP IDLE で新着を待ち受けます。**
 Always Free の対象なので費用はかからず、転送は数秒で完了します。
 
 ```
@@ -40,19 +40,15 @@ Always Free の対象なので費用はかからず、転送は数秒で完了�
 
 ---
 
-## 1. 構成の選択
+## 1. 構成と費用
 
-| | 構成 A: **GCE e2-micro** (推奨) | 構成 B: Cloud Run + Scheduler |
-|---|---|---|
-| 転送の遅延 | **数秒** (IMAP IDLE の push) | 平均 30 秒 / 最大 60 秒 |
-| 費用 | Always Free (後述) | 無料枠内だが**枠を大きく消費する** |
-| 消費する無料枠 | GCE の e2-micro 1 台ぶんのみ | Cloud Run の CPU 時間の約 7 割 + Scheduler 1 ジョブ + Firestore |
-| 状態の保存先 | VM 上の SQLite | Firestore |
-| 運用 | VM 1 台の面倒を見る | フルマネージド |
+GCE の **e2-micro を 1 台**常時起動し、その上で常駐プロセスが IMAP IDLE で
+新着を待ち受けます。同期位置は VM 上の SQLite に持ちます。
 
-同じプロジェクトで他に Cloud Run を使っている場合、構成 B は共有の無料枠を
-食い合います。構成 A なら Cloud Run にも Scheduler にも Firestore にも一切
-触れないので、他のサービスに影響しません。
+- **転送の遅延は数秒** — ポーリングではなく IMAP の push を使うため
+- **Always Free の対象** — 費用がかからない (条件は下記)
+- **他のサービスの無料枠を消費しない** — Cloud Run も Cloud Scheduler も
+  Firestore も使いません。使うのは e2-micro 1 台と Secret Manager だけです
 
 ### GCE の Always Free について (2026-09 時点の確認結果)
 
@@ -134,7 +130,7 @@ python tools/get_gmail_refresh_token.py \
 
 ---
 
-## 3. デプロイ (構成 A: GCE e2-micro)
+## 3. デプロイ
 
 ```bash
 cp deploy/config.env.example deploy/config.env
@@ -214,26 +210,6 @@ Actions タブから手動実行 (`workflow_dispatch`) もでき、そのとき
 続きから取り込むため**失われません**。デプロイ同士は `concurrency` で直列化され、
 走っているデプロイは中断されずに待たされます。
 
-> Cloud Run 構成 (下記) の CI デプロイは用意していません。必要な IAM ロールが
-> 別物になるうえ、この構成では検証できていないためです。手動で
-> `deploy/cloudrun/10-deploy.sh` を実行してください。
-
-### 構成 B: Cloud Run + Cloud Scheduler
-
-Cloud Run 側の無料枠に余裕があり、VM の管理をしたくない場合はこちらも使えます。
-
-```bash
-./deploy/cloudrun/00-setup.sh
-./deploy/cloudrun/10-deploy.sh
-./deploy/cloudrun/20-firestore-ttl.sh   # 任意
-```
-
-毎分ポーリング (43,200 回/月、1 回 3 秒として約 129,600 vCPU 秒) で、
-Cloud Run の無料枠 180,000 vCPU 秒のうち **7 割強を消費します**。
-同じ請求先アカウントで他に Cloud Run を使うなら、`SCHEDULE` を
-`*/5 * * * *` などに緩めるか、構成 A を選んでください。
-`--min-instances` は必ず 0 のままにしてください (1 以上で無料枠を大きく超えます)。
-
 ---
 
 ## 4. 即時性 (push) の仕組み
@@ -272,8 +248,8 @@ Cloud Run の無料枠 180,000 vCPU 秒のうち **7 割強を消費します**�
 | `GMAIL_USER_ID` | `me` | 挿入先ユーザー |
 | `ROUTES` | 下記 | 転送経路の定義 (JSON) |
 | `INITIAL_IMPORT` | `none` | `none`: 稼働後のメールのみ / `all`: 既存メールも全部 |
-| `STATE_BACKEND` | `sqlite` | `sqlite` / `firestore` / `memory` |
-| `STATE_DB_PATH` | `./state.db` | SQLite の保存先 (VM では `/var/lib/mail-transport/state.db`) |
+| `STATE_BACKEND` | `sqlite` | `sqlite` (ファイル) / `memory` (テスト用) |
+| `STATE_DB_PATH` | `./state.db` | 状態ファイルの場所 (VM では `/var/lib/mail-transport/state.db`) |
 | `IDLE_ENABLED` | `true` | `false` で IDLE を使わず定期ポーリングにする |
 | `IDLE_REFRESH_SECONDS` | `1500` | IDLE を張り直す間隔 (29 分未満にすること) |
 | `POLL_INTERVAL_SECONDS` | `60` | IDLE 非対応時のポーリング間隔 |

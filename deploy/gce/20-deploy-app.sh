@@ -18,7 +18,7 @@ trap 'rm -rf "${STAGE}"' EXIT
 echo "==> 配布物を用意します"
 mkdir -p "${STAGE}/mail-transport"
 cp -r "${REPO_ROOT}/src" "${STAGE}/mail-transport/src"
-cp "${REPO_ROOT}/pyproject.toml" "${REPO_ROOT}/requirements-vm.txt" "${STAGE}/mail-transport/"
+cp "${REPO_ROOT}/pyproject.toml" "${REPO_ROOT}/requirements.txt" "${STAGE}/mail-transport/"
 cp gce/mail-transport.service gce/install-on-vm.sh "${STAGE}/mail-transport/"
 # ローカルのビルド成果物を持ち込まない
 find "${STAGE}" -name '__pycache__' -type d -prune -exec rm -rf {} +

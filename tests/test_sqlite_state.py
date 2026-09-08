@@ -1,4 +1,4 @@
-"""SQLite 状態ストアのテスト (常時起動ホストでは Firestore を使わない)."""
+"""SQLite 状態ストアのテスト."""
 
 from __future__ import annotations
 

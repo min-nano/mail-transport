@@ -1,8 +1,7 @@
-"""同期状態の永続化 (Firestore) と多重起動防止ロック.
+"""同期状態の永続化と多重起動防止ロック.
 
-Firestore を使う理由:
-- Cloud Run のインスタンスは使い捨てなので、どこまで転送したかを外部に持つ必要がある
-- 無料枠 (1GiB / 読み取り 5万・書き込み 2万 per day) に十分収まる規模
+常駐プロセスは 1 台に 1 つしか動かないので、状態はローカルの SQLite に持つ。
+外部サービスに依存しないぶん障害点が減り、無料枠の消費もない。
 """
 
 from __future__ import annotations
@@ -101,106 +100,6 @@ class MemoryStateStore:
         self._seen.add(key)
 
 
-class FirestoreStateStore:
-    """Firestore (Native モード) を使った状態ストア."""
-
-    def __init__(
-        self,
-        project: str | None,
-        database: str = "(default)",
-        state_collection: str = "mail_transport_state",
-        seen_collection: str = "mail_transport_seen",
-        client=None,
-    ) -> None:
-        if client is None:
-            from google.cloud import firestore
-
-            client = firestore.Client(project=project, database=database)
-        self._client = client
-        self._state_collection = state_collection
-        self._seen_collection = seen_collection
-
-    # --- メールボックス状態 -------------------------------------------------
-    def get_mailbox_state(self, key: str) -> MailboxState | None:
-        snapshot = self._client.collection(self._state_collection).document(key).get()
-        if not snapshot.exists:
-            return None
-        return MailboxState.from_dict(snapshot.to_dict())
-
-    def put_mailbox_state(self, key: str, state: MailboxState) -> None:
-        payload = state.to_dict()
-        payload["updated_at"] = _now()
-        self._client.collection(self._state_collection).document(key).set(payload)
-
-    # --- ロック -------------------------------------------------------------
-    def acquire_lock(self, name: str, ttl_seconds: int, holder: str) -> bool:
-        """トランザクションで排他的にロックを取る.
-
-        Cloud Scheduler の再送や処理の長時間化で実行が重なると、同じメールを
-        二重に取り込む恐れがあるため、期限付きロックで直列化する。
-        """
-        from google.cloud import firestore
-
-        doc_ref = self._client.collection(self._state_collection).document(f"lock__{name}")
-        expires_at = _now() + dt.timedelta(seconds=ttl_seconds)
-
-        @firestore.transactional
-        def _acquire(transaction) -> bool:
-            snapshot = doc_ref.get(transaction=transaction)
-            if snapshot.exists:
-                data = snapshot.to_dict() or {}
-                current_expiry = data.get("expires_at")
-                if current_expiry and _to_aware(current_expiry) > _now():
-                    return False
-            transaction.set(doc_ref, {"holder": holder, "expires_at": expires_at})
-            return True
-
-        return bool(_acquire(self._client.transaction()))
-
-    def release_lock(self, name: str, holder: str) -> None:
-        from google.cloud import firestore
-
-        doc_ref = self._client.collection(self._state_collection).document(f"lock__{name}")
-
-        @firestore.transactional
-        def _release(transaction) -> None:
-            snapshot = doc_ref.get(transaction=transaction)
-            if snapshot.exists and (snapshot.to_dict() or {}).get("holder") == holder:
-                transaction.delete(doc_ref)
-
-        try:
-            _release(self._client.transaction())
-        except Exception:  # pragma: no cover - 解放失敗は TTL 切れで回復する
-            log.warning("ロックの解放に失敗しました (TTL 経過で自動解放されます)", exc_info=True)
-
-    def force_release_lock(self, name: str) -> bool:
-        doc_ref = self._client.collection(self._state_collection).document(f"lock__{name}")
-        existed = doc_ref.get().exists
-        doc_ref.delete()
-        return existed
-
-    # --- 重複排除 -----------------------------------------------------------
-    def is_seen(self, key: str) -> bool:
-        return self._client.collection(self._seen_collection).document(key).get().exists
-
-    def mark_seen(self, key: str, retention_days: int) -> None:
-        self._client.collection(self._seen_collection).document(key).set(
-            {
-                "created_at": _now(),
-                # Firestore の TTL ポリシーをこのフィールドに設定すると自動削除される
-                "expire_at": _now() + dt.timedelta(days=retention_days),
-            }
-        )
-
-
-def _to_aware(value) -> dt.datetime:
-    """Firestore から返るタイムスタンプを aware な datetime に正規化する."""
-    if isinstance(value, dt.datetime):
-        return value if value.tzinfo else value.replace(tzinfo=dt.UTC)
-    # google.api_core.datetime_helpers.DatetimeWithNanoseconds など
-    return dt.datetime.fromisoformat(str(value))
-
-
 def new_holder_id() -> str:
     return uuid.uuid4().hex
 
@@ -208,8 +107,7 @@ def new_holder_id() -> str:
 class SqliteStateStore:
     """ローカルファイル (SQLite) を使った状態ストア.
 
-    常時起動の VM で動かす場合、状態を外部サービスに置く必要はない。
-    Firestore を使わないぶん依存も無料枠の消費も減り、障害点も 1 つ減る。
+    常時起動の VM で動かすので、状態を外部サービスに置く必要はない。
     """
 
     def __init__(self, path: str) -> None:
@@ -350,11 +248,4 @@ def build_state_store(config) -> StateStore:
     """設定に応じた状態ストアを組み立てる."""
     if config.dry_run or config.state_backend == "memory":
         return MemoryStateStore()
-    if config.state_backend == "sqlite":
-        return SqliteStateStore(config.state_db_path)
-    return FirestoreStateStore(
-        project=config.project_id,
-        database=config.firestore_database,
-        state_collection=config.state_collection,
-        seen_collection=config.seen_collection,
-    )
+    return SqliteStateStore(config.state_db_path)

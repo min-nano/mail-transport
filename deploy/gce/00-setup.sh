@@ -14,7 +14,7 @@ echo "==> プロジェクトを設定します: ${PROJECT_ID}"
 gcloud config set project "${PROJECT_ID}" >/dev/null
 
 echo "==> 必要な API を有効化します"
-# GCE 構成では Firestore も Cloud Run も Scheduler も使わない
+# 使うのは Compute Engine と Secret Manager と Gmail API だけ
 gcloud services enable \
   compute.googleapis.com \
   secretmanager.googleapis.com \

@@ -10,7 +10,7 @@ on:
     paths:
       - "src/**"
       - "pyproject.toml"
-      - "requirements-vm.txt"
+      - "requirements.txt"
       - "deploy/lib.sh"
       - "deploy/gce/**"
       - ".github/workflows/deploy.yml"
