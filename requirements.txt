@@ -1,4 +1,4 @@
 # 常駐デーモンの依存。
 google-api-python-client==2.137.0
-google-auth==2.32.0
+google-auth==2.57.1
 google-cloud-secret-manager==2.20.2
