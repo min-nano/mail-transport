@@ -256,11 +256,9 @@ class ImapSource:
         typ, data = self.conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
         self._check(typ, data, f"UID FETCH {uid}")
         for line in data or []:
-            if (
-                isinstance(line, tuple)
-                and len(line) >= 2
-                and isinstance(line[1], (bytes, bytearray))
-            ):
+            if not isinstance(line, tuple) or len(line) < 2:
+                continue
+            if isinstance(line[1], bytes | bytearray):
                 return bytes(line[1])
         # 取得中に別クライアントが削除した場合など
         log.warning("UID %s の本文を取得できませんでした (削除された可能性)", uid)

@@ -18,17 +18,24 @@ jobs:
           cache: pip
       - name: 依存関係のインストール
         run: pip install -r requirements-dev.txt
+      # 以降の確認は互いに独立しているので、途中が落ちても最後まで実行する。
+      # そうしないと lint が落ちた回はテスト結果が分からず、直すたびに
+      # 次の失敗が現れることになる。
       - name: Lint (ruff)
+        if: ${{ !cancelled() }}
         run: |
           ruff check .
           ruff format --check .
       - name: テスト
+        if: ${{ !cancelled() }}
         run: pytest
       - name: パッケージのインストール確認 (VM と同じ手順)
+        if: ${{ !cancelled() }}
         run: |
           python -m venv /tmp/vmvenv
           /tmp/vmvenv/bin/pip install --quiet -r requirements.txt
           /tmp/vmvenv/bin/pip install --quiet --no-deps .
           /tmp/vmvenv/bin/python -m mailtransport.cli --help
       - name: デプロイスクリプトの構文確認
+        if: ${{ !cancelled() }}
         run: bash -n deploy/lib.sh deploy/gce/*.sh deploy/ci/*.sh

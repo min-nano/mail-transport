@@ -407,6 +407,10 @@ pytest
 ruff check . && ruff format --check .
 ```
 
+lint は **`requirements-dev.txt` がピン留めした ruff** で実行してください。
+ruff は版によって有効な規則が変わるため、`pip install ruff` で入れた別の版だと
+手元で通っても CI で落ちることがあります。
+
 ---
 
 ## 9. トラブルシューティング
