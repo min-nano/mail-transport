@@ -411,6 +411,18 @@ lint は **`requirements-dev.txt` がピン留めした ruff** で実行して�
 ruff は版によって有効な規則が変わるため、`pip install ruff` で入れた別の版だと
 手元で通っても CI で落ちることがあります。
 
+### 依存の更新
+
+[Dependabot](.github/dependabot.yml) が平日ごとに更新を確認し、
+新しい版があればプルリクエストを作ります。対象は次の 2 つです。
+
+- **pip** — `requirements.txt` (VM の実行時依存) と `requirements-dev.txt` (lint とテストの道具)
+- **github-actions** — ワークフローで使っている action
+
+プルリクエストでは `ci.yml` が走るので、lint・テスト・パッケージ導入確認が
+通ったものだけを取り込めます。`requirements.txt` の更新を main に取り込むと、
+`deploy.yml` が VM への再デプロイまで行います。
+
 ---
 
 ## 9. トラブルシューティング

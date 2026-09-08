@@ -1,0 +1,24 @@
+# 依存を最新に保つための Dependabot 設定。
+#
+# interval: daily は「平日 (月〜金) に毎日確認する」という意味。
+# 更新があるときだけプルリクエストが作られるので、毎日 PR が来るわけではない。
+#
+# 作られた PR では ci.yml が pull_request で走るため、
+# lint・テスト・パッケージ導入確認が通ったものだけを取り込める。
+version: 2
+updates:
+  # ワークフローで使っている action (actions/checkout, google-github-actions/auth など)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+
+  # Python の依存 (requirements.txt / requirements-dev.txt / pyproject.toml)
+  #
+  # requirements.txt は VM 上の常駐プロセスが使う実行時の依存、
+  # requirements-dev.txt は lint とテストの道具。どちらも版を固定しているので、
+  # Dependabot が上げない限り古いままになる (ruff の版ずれで CI が落ちた経緯がある)。
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
