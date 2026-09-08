@@ -55,7 +55,7 @@ class FakeWatcher:
         self.joined = True
 
 
-def run(config, sync, stop, watchers: list | None = None) -> int:
+def run(config, sync, stop, watchers: list | None = None, store=None) -> int:
     def factory(route: Route) -> FakeWatcher:
         watcher = FakeWatcher(route)
         if watchers is not None:
@@ -63,7 +63,12 @@ def run(config, sync, stop, watchers: list | None = None) -> int:
         return watcher
 
     return run_daemon(
-        config, MemoryStateStore(), stop=stop, sync_fn=sync, watcher_factory=factory, max_cycles=10
+        config,
+        store if store is not None else MemoryStateStore(),
+        stop=stop,
+        sync_fn=sync,
+        watcher_factory=factory,
+        max_cycles=10,
     )
 
 
@@ -245,3 +250,54 @@ def test_watcher_treats_a_missing_mailbox_as_a_failure():
     stop.set()
     thread.join(timeout=5)
     assert watcher.failures >= 1
+
+
+# --- デプロイ時の再起動まわり ---------------------------------------------
+
+
+def test_stale_lock_from_a_killed_process_is_released_at_startup():
+    """強制終了で残ったロックのせいで、再起動後の同期が止まらないこと.
+
+    デプロイのたびにプロセスを入れ替えるので、途中で SIGKILL された場合に
+    LOCK_TTL_SECONDS のあいだ何も転送できなくなると実害が大きい。
+    """
+    store = MemoryStateStore()
+    store.acquire_lock("sync", 600, "killed-process")  # 前回のプロセスが握ったまま
+    stop = threading.Event()
+    sync = RecordingSync(stop, stop_after=1)
+
+    run(make_config(**FAST), sync, stop, store=store)
+
+    assert sync.calls == 1
+    assert store.acquire_lock("sync", 60, "anyone") is True
+
+
+def test_shutdown_is_prompt_even_between_scheduled_syncs():
+    """SIGTERM から実際に止まるまで定期同期の間隔ぶん待たされないこと.
+
+    待たされると systemd の停止待ちがタイムアウトし、強制終了されて
+    ロックが残る (上のテストの状況を招く)。
+    """
+    stop = threading.Event()
+    sync = RecordingSync(stop, stop_after=999)  # 自分では止まらない
+    # 定期同期の間隔を長く取り、停止要求だけで抜けられることを見る
+    config = make_config(safety_sync_seconds=3600, debounce_seconds=0.0)
+
+    threading.Timer(0.2, stop.set).start()
+    finished = threading.Event()
+
+    def go():
+        run(config, sync, stop)
+        finished.set()
+
+    threading.Thread(target=go, daemon=True).start()
+
+    assert finished.wait(timeout=10) is True
+
+
+def test_force_release_reports_whether_a_lock_existed():
+    store = MemoryStateStore()
+
+    assert store.force_release_lock("sync") is False
+    store.acquire_lock("sync", 600, "someone")
+    assert store.force_release_lock("sync") is True

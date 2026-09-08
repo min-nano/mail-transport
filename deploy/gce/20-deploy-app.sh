@@ -5,8 +5,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
-source config.env
-: "${PROJECT_ID:?}" "${VM_NAME:?}" "${VM_ZONE:?}" "${ICLOUD_USERNAME:?}"
+source lib.sh
+load_deploy_config .
+require_vars PROJECT_ID VM_NAME VM_ZONE ICLOUD_USERNAME
 
 gcloud config set project "${PROJECT_ID}" >/dev/null
 
@@ -41,18 +42,39 @@ ENVEOF
 
 tar -czf "${STAGE}/mail-transport.tar.gz" -C "${STAGE}" mail-transport
 
+# CI から実行するときは IAP トンネル越しにする (公開 SSH を開けずに済む)
+mapfile -t SSH_ARGS < <(gcloud_ssh_args)
+
 echo "==> VM に転送します"
-gcloud compute scp "${STAGE}/mail-transport.tar.gz" \
-  "${VM_NAME}:/tmp/mail-transport.tar.gz" --zone="${VM_ZONE}"
+gcloud compute scp --quiet "${SSH_ARGS[@]}" \
+  "${STAGE}/mail-transport.tar.gz" "${VM_NAME}:/tmp/mail-transport.tar.gz"
 
 echo "==> VM 上でインストールします"
-gcloud compute ssh "${VM_NAME}" --zone="${VM_ZONE}" --command="
+# 更新は「止めて入れ替えて起動」の単純な手順。数秒の停止は許容する。
+gcloud compute ssh --quiet "${SSH_ARGS[@]}" "${VM_NAME}" --command="
   set -euo pipefail
   rm -rf /tmp/mail-transport
   tar -xzf /tmp/mail-transport.tar.gz -C /tmp
   chmod +x /tmp/mail-transport/install-on-vm.sh
   sudo /tmp/mail-transport/install-on-vm.sh
   rm -rf /tmp/mail-transport /tmp/mail-transport.tar.gz
+"
+
+echo "==> 稼働を確認します"
+# 起動直後に落ちる設定ミスを検出する。active でなければ非ゼロで終わる。
+gcloud compute ssh --quiet "${SSH_ARGS[@]}" "${VM_NAME}" --command="
+  set -euo pipefail
+  for i in \$(seq 1 15); do
+    if systemctl is-active --quiet mail-transport; then
+      echo 'mail-transport は稼働中です'
+      sudo journalctl -u mail-transport --no-pager --lines=30
+      exit 0
+    fi
+    sleep 2
+  done
+  echo '起動に失敗しました' >&2
+  sudo journalctl -u mail-transport --no-pager --lines=60 >&2
+  exit 1
 "
 
 echo

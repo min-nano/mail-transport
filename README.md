@@ -163,6 +163,61 @@ gcloud compute ssh mail-transport --zone=us-west1-b \
 起動直後は「同期位置を初期化しました」「IDLE で新着を待機します」とだけ出て、
 既存メールは転送されません (後述)。その後に届いたメールから転送が始まります。
 
+### CI (GitHub Actions) からデプロイする
+
+`main` への push で自動デプロイできます。サービスアカウントキー (JSON) を
+GitHub に置く必要はありません。**Workload Identity 連携**で GitHub の OIDC
+トークンを GCP に検証させるので、盗まれて困る長期の秘密情報が存在しません。
+
+一度だけ、GCP 側の設定を行います (VM 作成後に実行してください):
+
+```bash
+./deploy/ci/00-setup-wif.sh
+```
+
+このスクリプトは次を行い、最後に GitHub に設定すべき値を出力します。
+
+- Workload Identity プールと OIDC プロバイダの作成
+  - `assertion.repository == 'min-nano/mail-transport'` の条件を付け、
+    **このリポジトリからの実行だけ**を信頼するようにします
+- デプロイ用サービスアカウントの作成と最小権限の付与
+  - プロジェクト全体: `roles/compute.viewer` (読み取りのみ)
+  - **この VM に限定**: `roles/compute.osAdminLogin` と `roles/iap.tunnelResourceAccessor`
+  - 実行用 SA に限定: `roles/iam.serviceAccountUser`
+- IAP 経由 SSH 用のファイアウォール規則 (`35.235.240.0/20` からの tcp:22 のみ)
+
+出力された値を GitHub の Settings → Secrets and variables → Actions に登録します。
+
+| 種別 | 名前 | 例 |
+|---|---|---|
+| Variables | `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/123.../providers/github` |
+| Variables | `GCP_DEPLOYER_SA` | `mail-transport-deployer@<project>.iam.gserviceaccount.com` |
+| Variables | `GCP_PROJECT_ID` | `my-gcp-project` |
+| Variables | `GCP_VM_NAME` | `mail-transport` |
+| Variables | `GCP_VM_ZONE` | `us-west1-b` |
+| Secrets | `ICLOUD_USERNAME` | `you@icloud.com` |
+
+以降、`src/` や `deploy/gce/` を変更して `main` に push すると
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) が動きます。
+
+1. `ci.yml` を呼んでテスト・lint・パッケージ導入確認を行う (失敗したらデプロイしない)
+2. Workload Identity で認証し、IAP トンネル越しに VM へ SSH
+3. コードを転送してサービスを再起動
+4. `systemctl is-active` を最大 30 秒ポーリングして稼働を確認。
+   起動できなければ直近のログを出してジョブを失敗させる
+
+Actions タブから手動実行 (`workflow_dispatch`) もでき、そのとき
+`initial_import` に `all` を指定すれば既存メールの取り込みを走らせられます。
+
+**デプロイ中の停止について**: 更新は「止めて入れ替えて起動」なので、数十秒
+サービスが落ちます。その間に届いたメールは、再起動後の同期が前回の UID の
+続きから取り込むため**失われません**。デプロイ同士は `concurrency` で直列化され、
+走っているデプロイは中断されずに待たされます。
+
+> Cloud Run 構成 (下記) の CI デプロイは用意していません。必要な IAM ロールが
+> 別物になるうえ、この構成では検証できていないためです。手動で
+> `deploy/cloudrun/10-deploy.sh` を実行してください。
+
 ### 構成 B: Cloud Run + Cloud Scheduler
 
 Cloud Run 側の無料枠に余裕があり、VM の管理をしたくない場合はこちらも使えます。
@@ -347,6 +402,11 @@ sudo journalctl -u mail-transport | grep 転送しました      # 転送実績
   [稼働時間チェック](https://console.cloud.google.com/monitoring/uptime) ではなく、
   ログベースの指標 (`severity=ERROR`) にアラートを設定するのが確実です。
 
+### 手動デプロイ
+
+CI を使わずに更新する場合は、`deploy/gce/20-deploy-app.sh` をそのまま流します。
+転送 → 再インストール → サービス再起動 → 稼働確認まで行います。
+
 ### ローカルでの確認
 
 ```bash
@@ -385,6 +445,9 @@ ruff check . && ruff format --check .
 | `監視接続が切れました` が続く | iCloud 側の一時障害か接続数上限。自動で再接続するが、頻発するなら `IDLE_ENABLED=false` でポーリングに切り替える |
 | 同じメールが 2 通届く | `Message-ID` の無いメールが再取得された可能性。`SEEN_RETENTION_DAYS` を延ばす |
 | 想定外の課金が出た | ディスクが `pd-standard` か、リージョンが us-west1/us-central1/us-east1 か、VM が 1 台だけかを確認 |
+| CI が `GitHub の Variables / Secrets が未設定です` で落ちる | `deploy/ci/00-setup-wif.sh` の出力どおりに GitHub 側を登録する |
+| CI の SSH が `Permission denied` になる | インスタンス単位の `roles/compute.osAdminLogin` が効かない場合がある。プロジェクトレベルで付与し直す |
+| CI の SSH が IAP でつながらない | ファイアウォール規則 `allow-iap-ssh-mail-transport` と VM のタグ `mail-transport` を確認 |
 
 ---
 

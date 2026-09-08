@@ -4,8 +4,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
-source config.env
-: "${PROJECT_ID:?}" "${VM_NAME:?}" "${VM_ZONE:?}" "${RUNTIME_SA_NAME:?}"
+source lib.sh
+load_deploy_config .
+require_vars PROJECT_ID VM_NAME VM_ZONE RUNTIME_SA_NAME
 
 RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 gcloud config set project "${PROJECT_ID}" >/dev/null

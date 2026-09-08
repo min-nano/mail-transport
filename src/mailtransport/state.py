@@ -57,6 +57,8 @@ class StateStore(Protocol):
 
     def release_lock(self, name: str, holder: str) -> None: ...
 
+    def force_release_lock(self, name: str) -> bool: ...
+
     def is_seen(self, key: str) -> bool: ...
 
     def mark_seen(self, key: str, retention_days: int) -> None: ...
@@ -88,6 +90,9 @@ class MemoryStateStore:
         current = self._locks.get(name)
         if current and current[0] == holder:
             del self._locks[name]
+
+    def force_release_lock(self, name: str) -> bool:
+        return self._locks.pop(name, None) is not None
 
     def is_seen(self, key: str) -> bool:
         return key in self._seen
@@ -167,6 +172,12 @@ class FirestoreStateStore:
             _release(self._client.transaction())
         except Exception:  # pragma: no cover - 解放失敗は TTL 切れで回復する
             log.warning("ロックの解放に失敗しました (TTL 経過で自動解放されます)", exc_info=True)
+
+    def force_release_lock(self, name: str) -> bool:
+        doc_ref = self._client.collection(self._state_collection).document(f"lock__{name}")
+        existed = doc_ref.get().exists
+        doc_ref.delete()
+        return existed
 
     # --- 重複排除 -----------------------------------------------------------
     def is_seen(self, key: str) -> bool:
@@ -301,6 +312,12 @@ class SqliteStateStore:
     def release_lock(self, name: str, holder: str) -> None:
         with self._write_lock, self._connect() as conn:
             conn.execute("DELETE FROM locks WHERE name = ? AND holder = ?", (name, holder))
+
+    def force_release_lock(self, name: str) -> bool:
+        """持ち主に関係なくロックを外す (常駐プロセスの起動時のみ使う)."""
+        with self._write_lock, self._connect() as conn:
+            cursor = conn.execute("DELETE FROM locks WHERE name = ?", (name,))
+            return bool(cursor.rowcount)
 
     # --- 重複排除 -----------------------------------------------------------
     def is_seen(self, key: str) -> bool:

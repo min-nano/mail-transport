@@ -37,6 +37,7 @@ fi
 "${APP_DIR}/venv/bin/pip" install --quiet --upgrade pip
 "${APP_DIR}/venv/bin/pip" install --quiet -r "${APP_DIR}/requirements-vm.txt"
 "${APP_DIR}/venv/bin/pip" install --quiet --no-deps "${APP_DIR}"
+rm -rf "${APP_DIR}/build"
 
 echo "==> 状態ディレクトリを用意します"
 install -d -m 0750 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${STATE_DIR}"

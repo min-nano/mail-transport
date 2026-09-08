@@ -4,15 +4,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-if [[ -f config.env ]]; then
-  # shellcheck disable=SC1091
-  source config.env
-else
-  echo "deploy/config.env がありません。deploy/config.env.example をコピーしてください。" >&2
-  exit 1
-fi
-
-: "${PROJECT_ID:?}" "${RUNTIME_SA_NAME:?}"
+# shellcheck disable=SC1091
+source lib.sh
+load_deploy_config .
+require_vars PROJECT_ID RUNTIME_SA_NAME
 RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 echo "==> プロジェクトを設定します: ${PROJECT_ID}"

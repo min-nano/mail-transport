@@ -5,8 +5,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
-source config.env
-: "${PROJECT_ID:?}"
+source lib.sh
+load_deploy_config .
+require_vars PROJECT_ID
 
 gcloud firestore fields ttls update expire_at \
   --collection-group=mail_transport_seen \

@@ -1,0 +1,82 @@
+name: Deploy
+
+# main への push で GCE の常駐サービスを更新する。
+# 更新は「止めて入れ替えて起動」なので数秒〜数十秒の停止がある。
+# その間に届いたメールは、次の同期で UID の続きから取り込まれるため失われない。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "pyproject.toml"
+      - "requirements-vm.txt"
+      - "deploy/lib.sh"
+      - "deploy/gce/**"
+      - ".github/workflows/deploy.yml"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+    inputs:
+      initial_import:
+        description: "既存メールの扱い (none: 稼働後のみ / all: 既存も全部)"
+        type: choice
+        options: [none, all]
+        default: none
+
+# デプロイ同士が重ならないようにする。走っているものは止めずに待たせる。
+concurrency:
+  group: deploy-gce
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # Workload Identity 連携で OIDC トークンを取得するために必要
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 必要な設定が揃っているか確認する
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOYER_SA: ${{ vars.GCP_DEPLOYER_SA }}
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          VM_NAME: ${{ vars.GCP_VM_NAME }}
+          VM_ZONE: ${{ vars.GCP_VM_ZONE }}
+          ICLOUD_USERNAME: ${{ secrets.ICLOUD_USERNAME }}
+        run: |
+          missing=()
+          for name in WIF_PROVIDER DEPLOYER_SA PROJECT_ID VM_NAME VM_ZONE ICLOUD_USERNAME; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::GitHub の Variables / Secrets が未設定です: ${missing[*]}"
+            echo "deploy/ci/00-setup-wif.sh の出力を参照して設定してください。"
+            exit 1
+          fi
+
+      - name: GCP に認証する (鍵ファイルなし)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: VM にデプロイする
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          VM_NAME: ${{ vars.GCP_VM_NAME }}
+          VM_ZONE: ${{ vars.GCP_VM_ZONE }}
+          ICLOUD_USERNAME: ${{ secrets.ICLOUD_USERNAME }}
+          INITIAL_IMPORT: ${{ inputs.initial_import || 'none' }}
+          # 22 番を公開せず IAP トンネル越しに入る
+          USE_IAP: "true"
+        run: ./deploy/gce/20-deploy-app.sh

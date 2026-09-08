@@ -17,7 +17,7 @@ import time
 from mailtransport.config import Config, Route
 from mailtransport.imap_source import ImapError, ImapSource
 from mailtransport.state import StateStore
-from mailtransport.sync import sync_once
+from mailtransport.sync import LOCK_NAME, sync_once
 
 log = logging.getLogger(__name__)
 
@@ -139,13 +139,19 @@ def run_daemon(
         },
     )
 
+    # 前回のプロセスが強制終了 (デプロイ時の再起動など) されると、同期ロックが
+    # 期限切れまで残って新しいプロセスが何もできなくなる。常駐プロセスは 1 台に
+    # 1 つしか動かないので、起動時に必ず外す。
+    if _force_release_stale_lock(store):
+        log.warning("前回の実行が残したロックを解放しました")
+
     exit_code = 0
     cycles = 0
     last_purge = 0.0
     trigger.set()  # 起動直後に取りこぼしぶんを取り込む
     try:
         while not stop.is_set():
-            fired = trigger.wait(timeout=config.safety_sync_seconds)
+            fired = _wait_for_work(trigger, stop, config.safety_sync_seconds)
             if stop.is_set():
                 break
             trigger.clear()
@@ -181,7 +187,41 @@ def run_daemon(
     return exit_code
 
 
+# 停止要求 (SIGTERM) に気付くまでの最大の遅れ
+_STOP_CHECK_SECONDS = 1.0
 _PURGE_INTERVAL_SECONDS = 6 * 60 * 60
+
+
+def _wait_for_work(
+    trigger: threading.Event,
+    stop: threading.Event,
+    timeout: float,
+    step: float = _STOP_CHECK_SECONDS,
+) -> bool:
+    """新着の通知を待つ. 停止要求が来たら待たずに戻る.
+
+    ``trigger.wait(timeout)`` だけだと停止要求に気付くのが定期同期の間隔ぶん
+    遅れてしまい、systemd の停止待ちがタイムアウトして強制終了されてしまう。
+    """
+    deadline = time.monotonic() + timeout
+    while not stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if trigger.wait(min(step, remaining)):
+            return True
+    return False
+
+
+def _force_release_stale_lock(store: StateStore) -> bool:
+    force_release = getattr(store, "force_release_lock", None)
+    if force_release is None:
+        return False
+    try:
+        return bool(force_release(LOCK_NAME))
+    except Exception:  # pragma: no cover - 解放できなくても TTL 切れで回復する
+        log.warning("残留ロックの解放に失敗しました", exc_info=True)
+        return False
 
 
 def _maybe_purge(store: StateStore, last_purge: float) -> float:

@@ -3,15 +3,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-if [[ -f config.env ]]; then
-  # shellcheck disable=SC1091
-  source config.env
-else
-  echo "deploy/config.env がありません。" >&2
-  exit 1
-fi
-
-: "${PROJECT_ID:?}" "${REGION:?}" "${SERVICE_NAME:?}" "${JOB_NAME:?}" "${ICLOUD_USERNAME:?}"
+# shellcheck disable=SC1091
+source lib.sh
+load_deploy_config .
+require_vars PROJECT_ID REGION SERVICE_NAME JOB_NAME ICLOUD_USERNAME
 
 RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 INVOKER_SA="${INVOKER_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"

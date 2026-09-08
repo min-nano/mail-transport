@@ -83,3 +83,13 @@ def test_database_file_is_created_on_disk(tmp_path):
     SqliteStateStore(path).mark_seen("x", 1)
 
     assert os.path.exists(path)
+
+
+def test_force_release_breaks_a_lock_left_by_a_killed_process(store):
+    """デプロイ時にプロセスが強制終了されても、次の起動が止まらないこと."""
+    store.acquire_lock("sync", 600, "killed-process")
+    assert store.acquire_lock("sync", 60, "new-process") is False
+
+    assert store.force_release_lock("sync") is True
+    assert store.acquire_lock("sync", 60, "new-process") is True
+    assert store.force_release_lock("nothing-here") is False
