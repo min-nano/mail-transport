@@ -1,0 +1,76 @@
+"""ローカル実行用 CLI: ``python -m mailtransport.cli``.
+
+デプロイ前に .env を読み込んだ状態で疎通確認するために使う。
+``--dry-run`` を付けると Gmail への挿入も状態の保存も行わない。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+
+from mailtransport.logging_setup import setup_logging
+
+log = logging.getLogger(__name__)
+
+
+def _load_env_file(path: str) -> None:
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(name.strip(), value)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="iCloud から Gmail へメールを転送する")
+    parser.add_argument("--env-file", default=".env", help="読み込む環境変数ファイル")
+    parser.add_argument("--dry-run", action="store_true", help="転送も状態保存も行わない")
+    parser.add_argument("--loop", type=int, default=0, help="指定秒間隔で繰り返す (0 で 1 回のみ)")
+    args = parser.parse_args(argv)
+
+    _load_env_file(args.env_file)
+    if args.dry_run:
+        os.environ["DRY_RUN"] = "true"
+    setup_logging()
+
+    from mailtransport.config import load_config
+    from mailtransport.state import FirestoreStateStore, MemoryStateStore
+    from mailtransport.sync import sync_once
+
+    try:
+        config = load_config()
+    except ValueError as exc:
+        log.error("設定エラー: %s", exc)
+        return 2
+
+    if config.dry_run:
+        store = MemoryStateStore()
+    else:
+        store = FirestoreStateStore(
+            project=config.project_id,
+            database=config.firestore_database,
+            state_collection=config.state_collection,
+            seen_collection=config.seen_collection,
+        )
+
+    import time
+
+    while True:
+        report = sync_once(config, store)
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        if args.loop <= 0:
+            return 1 if report.failed else 0
+        time.sleep(args.loop)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
