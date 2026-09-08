@@ -28,9 +28,9 @@ concurrency:
   group: deploy-gce
   cancel-in-progress: false
 
+# 既定は読み取りだけにして、OIDC トークンを作れるのは deploy ジョブに限る。
 permissions:
   contents: read
-  id-token: write   # Workload Identity 連携で OIDC トークンを取得するために必要
 
 jobs:
   test:
@@ -40,6 +40,13 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: read
+      id-token: write   # Workload Identity 連携で OIDC トークンを取得するために必要
+    # workflow_dispatch は任意のブランチを選べるので、main 以外では動かさない。
+    # 本命の防御は GCP 側の attribute-condition (deploy/ci/00-setup-wif.sh) だが、
+    # ここで止めれば紛らわしい途中失敗を避けられる。
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v7
 
