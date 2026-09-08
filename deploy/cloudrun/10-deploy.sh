@@ -2,7 +2,7 @@
 # Cloud Run へのデプロイと Cloud Scheduler ジョブの作成。
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 if [[ -f config.env ]]; then
   # shellcheck disable=SC1091
   source config.env
@@ -30,7 +30,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --min-instances="${MIN_INSTANCES:-0}" \
   --max-instances="${MAX_INSTANCES:-1}" \
   --timeout="${REQUEST_TIMEOUT:-300}" \
-  --set-env-vars="ICLOUD_USERNAME=${ICLOUD_USERNAME},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},MAX_MESSAGES_PER_RUN=${MAX_MESSAGES_PER_RUN:-40},RUN_BUDGET_SECONDS=${RUN_BUDGET_SECONDS:-240},INITIAL_IMPORT=${INITIAL_IMPORT:-none}" \
+  --set-env-vars="ICLOUD_USERNAME=${ICLOUD_USERNAME},GOOGLE_CLOUD_PROJECT=${PROJECT_ID},STATE_BACKEND=firestore,MAX_MESSAGES_PER_RUN=${MAX_MESSAGES_PER_RUN:-40},RUN_BUDGET_SECONDS=${RUN_BUDGET_SECONDS:-240},INITIAL_IMPORT=${INITIAL_IMPORT:-none}" \
   --set-secrets="ICLOUD_APP_PASSWORD=icloud-app-password:latest,GMAIL_OAUTH_JSON=gmail-oauth:latest"
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --format='value(status.url)')"

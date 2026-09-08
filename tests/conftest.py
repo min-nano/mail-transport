@@ -29,6 +29,14 @@ def make_config(**overrides) -> Config:
         initial_import="none",
         dry_run=False,
         imap_timeout_seconds=60,
+        state_backend="memory",
+        state_db_path=":memory:",
+        idle_enabled=True,
+        idle_refresh_seconds=1500,
+        poll_interval_seconds=60,
+        safety_sync_seconds=300,
+        debounce_seconds=0.0,
+        reconnect_backoff_max_seconds=300,
     )
     base.update(overrides)
     return Config(**base)

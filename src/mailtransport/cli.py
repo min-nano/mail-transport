@@ -35,6 +35,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", default=".env", help="読み込む環境変数ファイル")
     parser.add_argument("--dry-run", action="store_true", help="転送も状態保存も行わない")
     parser.add_argument("--loop", type=int, default=0, help="指定秒間隔で繰り返す (0 で 1 回のみ)")
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="常駐して IMAP IDLE で新着を待ち受ける (常時起動ホスト向け)",
+    )
     args = parser.parse_args(argv)
 
     _load_env_file(args.env_file)
@@ -43,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging()
 
     from mailtransport.config import load_config
-    from mailtransport.state import FirestoreStateStore, MemoryStateStore
+    from mailtransport.state import build_state_store
     from mailtransport.sync import sync_once
 
     try:
@@ -52,15 +57,16 @@ def main(argv: list[str] | None = None) -> int:
         log.error("設定エラー: %s", exc)
         return 2
 
-    if config.dry_run:
-        store = MemoryStateStore()
-    else:
-        store = FirestoreStateStore(
-            project=config.project_id,
-            database=config.firestore_database,
-            state_collection=config.state_collection,
-            seen_collection=config.seen_collection,
-        )
+    store = build_state_store(config)
+
+    if args.daemon:
+        import threading
+
+        from mailtransport.daemon import install_signal_handlers, run_daemon
+
+        stop = threading.Event()
+        install_signal_handlers(stop)
+        return run_daemon(config, store, stop=stop)
 
     import time
 

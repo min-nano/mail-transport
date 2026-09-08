@@ -22,5 +22,13 @@ jobs:
           ruff format --check .
       - name: テスト
         run: pytest
-      - name: コンテナのビルド確認
+      - name: パッケージのインストール確認 (VM 構成)
+        run: |
+          python -m venv /tmp/vmvenv
+          /tmp/vmvenv/bin/pip install --quiet -r requirements-vm.txt
+          /tmp/vmvenv/bin/pip install --quiet --no-deps .
+          /tmp/vmvenv/bin/python -m mailtransport.cli --help
+      - name: デプロイスクリプトの構文確認
+        run: bash -n deploy/gce/*.sh deploy/cloudrun/*.sh
+      - name: コンテナのビルド確認 (Cloud Run 構成)
         run: docker build -t mail-transport:ci .

@@ -11,6 +11,7 @@ import datetime as dt
 import imaplib
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,14 @@ _FLAGS_RE = re.compile(rb"FLAGS\s+\(([^)]*)\)", re.IGNORECASE)
 _UID_RE = re.compile(rb"\bUID\s+(\d+)", re.IGNORECASE)
 _SIZE_RE = re.compile(rb"RFC822\.SIZE\s+(\d+)", re.IGNORECASE)
 _INTERNALDATE_RE = re.compile(rb'INTERNALDATE\s+"([^"]+)"', re.IGNORECASE)
+# IDLE 中に「新着があった」と判断する未応答レスポンス。
+# サーバーが送ってくる "* OK Still here" のような keepalive では起こさない。
+_IDLE_ACTIVITY_RE = re.compile(rb"^\*\s+\d+\s+(EXISTS|RECENT)\b", re.IGNORECASE)
+_BYE_RE = re.compile(rb"^\*\s+BYE\b", re.IGNORECASE)
+
+
+# IDLE 終了時に読み捨てる未応答レスポンスの上限 (無限ループ防止)
+_MAX_IDLE_DRAIN_LINES = 1000
 
 
 class ImapError(RuntimeError):
@@ -256,6 +265,73 @@ class ImapSource:
         # 取得中に別クライアントが削除した場合など
         log.warning("UID %s の本文を取得できませんでした (削除された可能性)", uid)
         return None
+
+    # --- IDLE (push 受信) ---------------------------------------------------
+    def has_capability(self, name: str) -> bool:
+        capabilities = getattr(self.conn, "capabilities", ()) or ()
+        return name.upper() in {str(c).upper() for c in capabilities}
+
+    def idle_wait(self, timeout: float, poll_step: float = 30.0) -> bool:
+        """IDLE で新着を待ち、通知が来たら True、時間切れなら False を返す.
+
+        RFC 2177 の IDLE は、サーバー側に変化があった時点で未応答レスポンスを
+        送ってくる。ポーリングと違い到着から数秒で気付けるが、接続を張り続ける
+        必要があるため常時起動のホストでのみ使える。
+
+        ``timeout`` には 29 分未満を指定すること。それ以上 IDLE を続けると
+        サーバーやその手前の NAT に切断されうる (RFC 2177 の推奨)。
+        """
+        conn = self.conn
+        tag = conn._new_tag()
+        conn.send(b"%s IDLE\r\n" % tag)
+        line = conn.readline()
+        if not line.startswith(b"+"):
+            raise ImapError(f"IDLE を開始できませんでした: {line!r}")
+
+        sock = conn.socket()
+        previous_timeout = sock.gettimeout()
+        activity = False
+        broken = False
+        try:
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                # select ではなくソケットタイムアウトで待つ。imaplib の
+                # バッファに溜まった通知を取りこぼさないため。
+                sock.settimeout(min(poll_step, remaining))
+                try:
+                    line = conn.readline()
+                except TimeoutError:
+                    continue
+                if not line:
+                    broken = True
+                    raise ImapError("IDLE 中に接続が切断されました")
+                if _BYE_RE.match(line):
+                    broken = True
+                    raise ImapError(f"サーバーが接続を閉じました: {line!r}")
+                if _IDLE_ACTIVITY_RE.match(line):
+                    activity = True
+                    break
+        finally:
+            try:
+                sock.settimeout(previous_timeout)
+            except OSError:  # pragma: no cover - 切断済みなら意味がない
+                pass
+            if not broken:
+                self._end_idle(tag)
+        return activity
+
+    def _end_idle(self, tag: bytes) -> None:
+        """DONE を送り、IDLE の完了応答を読み切って通常状態に戻す."""
+        conn = self.conn
+        conn.send(b"DONE\r\n")
+        for _ in range(_MAX_IDLE_DRAIN_LINES):
+            line = conn.readline()
+            if not line or line.startswith(tag):
+                return
+        raise ImapError("IDLE の終了応答を受け取れませんでした")
 
 
 def _parse_internaldate(raw: bytes) -> dt.datetime | None:

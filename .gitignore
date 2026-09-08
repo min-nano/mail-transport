@@ -16,3 +16,5 @@ token.json
 secrets/
 deploy/config.env
 deploy/gmail_oauth.json
+build/
+dist/

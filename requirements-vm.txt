@@ -1,0 +1,5 @@
+# 常駐デーモン (GCE e2-micro) 用の依存。
+# Flask / gunicorn は Cloud Run 構成でしか使わないので入れない。
+google-api-python-client==2.137.0
+google-auth==2.32.0
+google-cloud-secret-manager==2.20.2

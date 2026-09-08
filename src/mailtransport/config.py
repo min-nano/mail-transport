@@ -103,6 +103,14 @@ class Config:
     initial_import: str
     dry_run: bool
     imap_timeout_seconds: int
+    state_backend: str
+    state_db_path: str
+    idle_enabled: bool
+    idle_refresh_seconds: int
+    poll_interval_seconds: int
+    safety_sync_seconds: int
+    debounce_seconds: float
+    reconnect_backoff_max_seconds: int
     metadata: dict = field(default_factory=dict)
 
 
@@ -196,6 +204,10 @@ def load_config() -> Config:
     if initial_import not in {"none", "all"}:
         raise ValueError("INITIAL_IMPORT は 'none' か 'all' を指定してください")
 
+    state_backend = (_env("STATE_BACKEND", "sqlite") or "sqlite").strip().lower()
+    if state_backend not in {"sqlite", "firestore", "memory"}:
+        raise ValueError("STATE_BACKEND は 'sqlite' / 'firestore' / 'memory' のいずれかです")
+
     return Config(
         icloud_username=username,
         # アプリ用パスワードは Apple の表示に合わせて空白入りで貼られることが多い
@@ -219,4 +231,16 @@ def load_config() -> Config:
         initial_import=initial_import,
         dry_run=_env_bool("DRY_RUN", False),
         imap_timeout_seconds=_env_int("IMAP_TIMEOUT_SECONDS", 60),
+        state_backend=state_backend,
+        state_db_path=_env("STATE_DB_PATH", "./state.db"),
+        idle_enabled=_env_bool("IDLE_ENABLED", True),
+        # RFC 2177 は 29 分以内に IDLE を張り直すことを求めている
+        idle_refresh_seconds=_env_int("IDLE_REFRESH_SECONDS", 1500),
+        # IDLE が使えないサーバー向けのフォールバック間隔
+        poll_interval_seconds=_env_int("POLL_INTERVAL_SECONDS", 60),
+        # IDLE の取りこぼしに備えた定期同期
+        safety_sync_seconds=_env_int("SAFETY_SYNC_SECONDS", 300),
+        # 連続到着をまとめるための待ち時間
+        debounce_seconds=float(_env("DEBOUNCE_SECONDS", "2") or 2),
+        reconnect_backoff_max_seconds=_env_int("RECONNECT_BACKOFF_MAX_SECONDS", 300),
     )

@@ -38,19 +38,9 @@ def _get_config():
 def _get_store(config):
     global _store
     if _store is None:
-        if config.dry_run:
-            from mailtransport.state import MemoryStateStore
+        from mailtransport.state import build_state_store
 
-            _store = MemoryStateStore()
-        else:
-            from mailtransport.state import FirestoreStateStore
-
-            _store = FirestoreStateStore(
-                project=config.project_id,
-                database=config.firestore_database,
-                state_collection=config.state_collection,
-                seen_collection=config.seen_collection,
-            )
+        _store = build_state_store(config)
     return _store
 
 

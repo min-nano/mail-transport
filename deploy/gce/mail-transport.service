@@ -1,0 +1,42 @@
+[Unit]
+Description=mail-transport: iCloud から Gmail へのメール転送 (IMAP IDLE 常駐)
+Documentation=https://github.com/min-nano/mail-transport
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mailtransport
+Group=mailtransport
+EnvironmentFile=/etc/mail-transport.env
+WorkingDirectory=/var/lib/mail-transport
+ExecStart=/opt/mail-transport/venv/bin/python -m mailtransport.cli --daemon
+# 落ちても必ず戻す。iCloud 側の一時的な障害でも転送を止めない。
+Restart=always
+RestartSec=10s
+
+# --- 権限の最小化 ---
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+# 状態ファイルの置き場だけ書き込みを許可する
+ReadWritePaths=/var/lib/mail-transport
+
+# e2-micro は 1GB しかないので暴走時に道連れにしない
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

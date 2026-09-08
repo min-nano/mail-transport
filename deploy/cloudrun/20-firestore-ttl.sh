@@ -3,7 +3,7 @@
 # 設定しなくても動作するが、Firestore の使用量を一定に保てる。
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
 source config.env
 : "${PROJECT_ID:?}"

@@ -3,12 +3,12 @@
 # 何度実行しても安全 (冪等) になるようにしている。
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 if [[ -f config.env ]]; then
   # shellcheck disable=SC1091
   source config.env
 else
-  echo "deploy/config.env がありません。config.env.example をコピーしてください。" >&2
+  echo "deploy/config.env がありません。deploy/config.env.example をコピーしてください。" >&2
   exit 1
 fi
 
