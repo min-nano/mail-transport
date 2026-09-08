@@ -46,16 +46,37 @@ else
 fi
 
 echo "==> OIDC プロバイダを用意します"
-# attribute-condition でこのリポジトリ以外からの利用を拒否する。
-# これを省くと同じ発行者 (= 全 GitHub リポジトリ) が対象になってしまう。
+# 誰がトークンを受け取れるかを、GitHub が署名した主張 (assertion) で絞る。
+#
+# 1. repository       — このリポジトリ以外からの利用を拒否する。省くと同じ
+#                       発行者 (= 全 GitHub リポジトリ) が対象になってしまう。
+# 2. ref              — main 以外を拒否する。同一リポジトリのブランチから出した
+#                       プルリクエストは権限が制限されないため、ワークフローを
+#                       1 つ足すだけで id-token を取得できてしまう。fork からの
+#                       PR は読み取り専用なので元々届かないが、内部ブランチは
+#                       ここで止める必要がある。workflow_dispatch も任意の
+#                       ブランチを選べるので同様。
+#                       PR のときの ref は refs/pull/<番号>/merge になる。
+# 3. job_workflow_ref — 認証できるワークフローを deploy.yml 1 本に限定する。
+#                       main に別のワークフローが増えても、そこからは
+#                       デプロイ用サービスアカウントに成り代われない。
+#
+# deploy.yml の名前を変えたときはこの条件も直すこと (直さないと認証が通らない)。
+DEPLOY_WORKFLOW="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
+DEPLOY_WORKFLOW_REF="${GITHUB_REPO}/${DEPLOY_WORKFLOW}@refs/heads/${DEPLOY_BRANCH:-main}"
+ATTRIBUTE_CONDITION="assertion.repository == '${GITHUB_REPO}'"
+ATTRIBUTE_CONDITION+=" && assertion.ref == 'refs/heads/${DEPLOY_BRANCH:-main}'"
+ATTRIBUTE_CONDITION+=" && assertion.job_workflow_ref == '${DEPLOY_WORKFLOW_REF}'"
+
 PROVIDER_ARGS=(
   --location=global
   --workload-identity-pool="${POOL}"
   --display-name="GitHub Actions OIDC"
   --issuer-uri="https://token.actions.githubusercontent.com"
-  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref"
-  --attribute-condition="assertion.repository == '${GITHUB_REPO}'"
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref,attribute.workflow_ref=assertion.job_workflow_ref"
+  --attribute-condition="${ATTRIBUTE_CONDITION}"
 )
+echo "    許可する条件: ${ATTRIBUTE_CONDITION}"
 if gcloud iam workload-identity-pools providers describe "${PROVIDER}" \
      --location=global --workload-identity-pool="${POOL}" >/dev/null 2>&1; then
   gcloud iam workload-identity-pools providers update-oidc "${PROVIDER}" "${PROVIDER_ARGS[@]}"
@@ -133,6 +154,16 @@ cat <<SUMMARY
   Settings → Secrets and variables → Actions → Secrets
     ICLOUD_USERNAME                = ${ICLOUD_USERNAME:-you@icloud.com}
 
-以降 main への push で .github/workflows/deploy.yml が動きます。
+以降 ${DEPLOY_BRANCH:-main} への push で ${DEPLOY_WORKFLOW} が動きます。
+
+このプロバイダが発行を許すのは次の条件をすべて満たす場合だけです。
+  - リポジトリが ${GITHUB_REPO}
+  - ref が refs/heads/${DEPLOY_BRANCH:-main}
+  - ワークフローが ${DEPLOY_WORKFLOW}
+プルリクエストや他ブランチからは、ワークフローを足しても認証できません。
+
+あわせて GitHub 側でも二重に塞ぐことを勧めます:
+  Settings → Environments → production → Deployment branches and tags
+  → Selected branches → main を追加
 ============================================================
 SUMMARY

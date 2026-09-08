@@ -174,8 +174,7 @@ GitHub に置く必要はありません。**Workload Identity 連携**で GitHu
 このスクリプトは次を行い、最後に GitHub に設定すべき値を出力します。
 
 - Workload Identity プールと OIDC プロバイダの作成
-  - `assertion.repository == 'min-nano/mail-transport'` の条件を付け、
-    **このリポジトリからの実行だけ**を信頼するようにします
+  - **main ブランチの deploy.yml からの実行だけ**を信頼します (次項)
 - デプロイ用サービスアカウントの作成と最小権限の付与
   - プロジェクト全体: `roles/compute.viewer` (読み取りのみ)
   - **この VM に限定**: `roles/compute.osAdminLogin` と `roles/iap.tunnelResourceAccessor`
@@ -192,6 +191,49 @@ GitHub に置く必要はありません。**Workload Identity 連携**で GitHu
 | Variables | `GCP_VM_NAME` | `mail-transport` |
 | Variables | `GCP_VM_ZONE` | `us-west1-b` |
 | Secrets | `ICLOUD_USERNAME` | `you@icloud.com` |
+
+### なぜ main に限定するのか
+
+プルリクエストにワークフローを 1 つ足すだけで本番に到達できてしまうため、
+**GCP 側でブランチを縛る**必要があります。
+
+- **fork からの PR** — トークンは読み取り専用でシークレットも渡らないので、
+  そもそも `id-token: write` を取得できません。
+- **同じリポジトリのブランチから出した PR** — 権限は制限されません。
+  `id-token: write` を要求するワークフローを PR に含めれば、
+  デプロイ用サービスアカウントに成り代われてしまいます。
+  main が「PR 必須」で保護されていても、この経路はそれを迂回します。
+- **`workflow_dispatch`** — 実行時に任意のブランチを選べます。
+
+そこで OIDC プロバイダの `attribute-condition` を次のようにしています。
+GitHub が署名した主張なので、ワークフロー側からは詐称できません。
+
+```
+assertion.repository == 'min-nano/mail-transport'
+  && assertion.ref == 'refs/heads/main'
+  && assertion.job_workflow_ref
+       == 'min-nano/mail-transport/.github/workflows/deploy.yml@refs/heads/main'
+```
+
+| 実行元 | 結果 |
+|---|---|
+| main への push / main での `workflow_dispatch` | 許可 |
+| PR (`ref` が `refs/pull/<番号>/merge` になる) | **拒否** |
+| 他ブランチへの push、他ブランチでの `workflow_dispatch` | **拒否** |
+| main に増えた別のワークフロー | **拒否** (deploy.yml に限定しているため) |
+| 他リポジトリからのなりすまし | **拒否** |
+
+`deploy.yml` の名前を変えるときは、この条件も直してください
+(直さないと認証が通らなくなります)。
+
+ワークフロー側にも保険を入れてあります。`id-token: write` は `deploy` ジョブ
+だけに与え (テストのジョブには渡しません)、`if: github.ref == 'refs/heads/main'`
+で main 以外では動かないようにしています。
+
+**あわせて GitHub 側でも塞ぐことを勧めます。**
+Settings → Environments → `production` → Deployment branches and tags で
+Selected branches に `main` を追加すると、main 以外の ref では `deploy` ジョブ
+自体が起動しなくなります。GCP 側と合わせて二重の防御になります。
 
 以降、`src/` や `deploy/gce/` を変更して `main` に push すると
 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) が動きます。
@@ -333,6 +375,9 @@ Actions タブから手動実行 (`workflow_dispatch`) もでき、そのとき
 - **権限は最小限**。VM のサービスアカウントに与えるのは、
   該当する 2 つのシークレットに対する `secretAccessor` のみです。
   プロジェクト全体の権限は付与しません。
+- **CI がデプロイできるのは main の `deploy.yml` からだけ。**
+  OIDC トークンの発行条件をブランチとワークフローで縛っているので、
+  プルリクエストにワークフローを足しても本番には届きません (第 3 章)。
 - **Gmail のスコープは `gmail.insert` のみ。**
   トークンが漏れても、既存メールの閲覧・削除・送信はできません。
 - **外部からの受信ポートを開けません。** VM は外向き通信しかしないので、
@@ -440,6 +485,7 @@ ruff は版によって有効な規則が変わるため、`pip install ruff` �
 | CI が `GitHub の Variables / Secrets が未設定です` で落ちる | `deploy/ci/00-setup-wif.sh` の出力どおりに GitHub 側を登録する |
 | CI の SSH が `Permission denied` になる | インスタンス単位の `roles/compute.osAdminLogin` が効かない場合がある。プロジェクトレベルで付与し直す |
 | CI の SSH が IAP でつながらない | ファイアウォール規則 `allow-iap-ssh-mail-transport` と VM のタグ `mail-transport` を確認 |
+| CI の認証が `unable to acquire impersonated credentials` などで失敗する | main 以外から動かしていないか確認。`deploy.yml` を改名・移動した場合は `deploy/ci/00-setup-wif.sh` を再実行して条件を更新する |
 
 ---
 
