@@ -577,7 +577,7 @@ claude setup-token
   ```
   --allowedTools "mcp__github_inline_comment__create_inline_comment,
                   Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
-  --disallowedTools Edit,Write,NotebookEdit
+  --disallowedTools Edit,Write,NotebookEdit,WebFetch,WebSearch
   ```
 
   `Bash` は `gh pr` の 3 つの形にだけ絞ってあるので、任意のコマンドは実行できません。
