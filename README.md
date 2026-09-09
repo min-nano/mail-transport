@@ -572,10 +572,25 @@ claude setup-token
   ファイルの書き換えも外しています。git の書き込みは、ジョブの `permissions` が
   `contents: read` なので **push が通りません**。
 
+  **これがツールのすべてです。** 固定先のコミットで
+  [`src/modes/agent/index.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/modes/agent/index.ts)
+  を確認したところ、agent モードは `--permission-mode` を設定せず、既定の
+  `allowedTools` / `disallowedTools` も注入せず、`github_comment` の MCP サーバも
+  追加しません (`claudeCommentId: undefined, // No tracking comment in agent mode`)。
+  上に書いた許可リストがそのまま全体になります。
+
+  > **`track_progress` は使いません。**
+  > [`src/modes/detector.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/modes/detector.ts)
+  > を読むと、`track_progress: true` と `pull_request` イベントの組み合わせでは
+  > `prompt` を渡していても**無条件に tag モード**になります。tag モードは
+  > `--permission-mode acceptEdits` を設定し、ワークスペース内の書き込みを
+  > 自動で許可します。自動レビューには要らない権限です。
+
   > **旧実装より一段弱い点。** 旧実装は `allowed_tools=["Read", "Glob", "Grep"]` で、
   > エージェントに投稿手段を一切与えず、Python 側がコメントを書いていました。
-  > agent モードではエージェント自身が投稿するため、書き込み系のツールが
-  > 必要になります。公式の推奨構成を採る代わりに受け入れているトレードオフです。
+  > agent モードではエージェント自身が投稿するため、`gh pr comment` と
+  > インラインコメントのツールが必要になります。公式の推奨構成を採る代わりに
+  > 受け入れているトレードオフです。
 
 - **リポジトリの中身は指示ではなくデータとして扱わせています。** 「レビューを省略しろ」
   といった文がコードやコメントに混ざっていても従わず、そういう記述自体を
