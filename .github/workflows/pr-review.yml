@@ -1,0 +1,44 @@
+name: PR Review
+
+# プルリクエストを Claude にレビューさせる。
+# まず Claude Sonnet が変更の規模と性質からモデルを決め、そのモデルで
+# Claude Agent SDK のセッションを回す。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# 新しく push されたら前のレビューは用済みなので止める。
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write   # レビュー結果をコメントとして書くため
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # fork からの PR にはシークレットが渡らないので動かせない。
+    # 落として赤くするより、走らせないほうがよい。
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # base との差分を取るため履歴が要る
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: レビュー用の依存をインストールする
+        run: pip install -r requirements-review.txt
+
+      - name: レビューする
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m tools.pr_review
