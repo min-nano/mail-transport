@@ -600,9 +600,16 @@ claude setup-token
 - **bot の投稿** (`github.event.sender.type == 'Bot'`)。自分が出したレビューと
   インラインコメントがそのまま次の実行を呼び、際限なく回るためです。
 - **イシューへのコメント**。`issue_comment` はイシューにも飛んできます。
-- **書き込み権限のない人のコメント**。`author_association` が `OWNER` /
-  `MEMBER` / `COLLABORATOR` のいずれでもないものは無視します。誰のコメントでも
-  走ると、外部の人がコメント本文でエージェントを動かせてしまいます。
+- **書き込み権限のない人のコメント**。`gh api repos/…/collaborators/…/permission`
+  で実際の権限を引き、`admin` / `write` / `maintain` 以外は無視します。誰の
+  コメントでも走ると、外部の人がコメント本文でエージェントを動かせてしまいます。
+
+  > `author_association` では判定できません。**このリポジトリの管理者でも
+  > `CONTRIBUTOR` になることがあり**(組織の所属が公開されていない場合など)、
+  > それだけを見ると正当な人を黙って弾いてしまいます。実際にこのリポジトリで、
+  > `role_name: admin` の利用者のコメントが `authorAssociation: CONTRIBUTOR`
+  > になっていました。権限を引けなかったときの保険としてのみ、
+  > `OWNER` / `MEMBER` / `COLLABORATOR` を見ています。
 - **fork からのプルリクエスト**。`issue_comment` は base 側の文脈で走り、
   シークレットが渡ってしまうため、`pull_request` の `if` だけでは足りません。
   `gh pr view --json isCrossRepository` で明示的に落としています。
