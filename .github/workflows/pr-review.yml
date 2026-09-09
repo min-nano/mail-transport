@@ -107,9 +107,12 @@ jobs:
           # コメントの投稿に要るものだけを許可する。そのうえで Edit / Write /
           # NotebookEdit を明示的に外し、ファイルを書き換えられないようにする。
           #
-          # --model と --max-turns はログ上 SDK の設定 (model / maxTurns) に
-          # 反映されることを確認済み。--effort と --max-budget-usd が実際に
-          # 効いているかは未確認 (アクションは CLI ではなく Agent SDK を呼ぶ)。
+          # claude_args のうち、アクションが自前で扱うもの (model / max-turns /
+          # allowedTools / disallowedTools など) は SDK の設定に取り出され、
+          # 残りは extraArgs としてそのまま CLI に渡る。--effort と
+          # --max-budget-usd は後者なので効く。ジョブログの "SDK options" に
+          # これらが出ないのは、extraArgs をログから除外しているためで、
+          # 無視されているわけではない (base-action/src/run-claude-sdk.ts)。
           claude_args: >-
             --model claude-sonnet-5
             --effort xhigh

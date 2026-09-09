@@ -598,11 +598,18 @@ claude setup-token
 - **fork からのプルリクエストでは動きません。** シークレットが渡らないためです
   (落として赤くするのではなく、そもそも起動しません)。
 - **1 回のレビューに上限があります。** `--max-turns` と `--max-budget-usd` で
-  頭打ちにしています。`--max-turns` は SDK の設定 (`maxTurns`) に反映されることを
-  ログで確認済み、`--max-budget-usd` はレビューセッション自身が予算を `$2` として
-  認識していることを確認済みです。**`--effort` が実際に反映されているかだけは
-  未確認**です (アクションは CLI ではなく Agent SDK を呼ぶため、対応する設定が
-  無いフラグは無視される可能性があります)。
+  頭打ちにしています。
+
+  > **ジョブログの "SDK options" に `--effort` と `--max-budget-usd` は出ません。**
+  > 効いていないのではなく、ログに出していないだけです。
+  > [`base-action/src/parse-sdk-options.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/base-action/src/parse-sdk-options.ts)
+  > は `claude_args` のうちアクションが自前で扱うもの (`model` / `max-turns` /
+  > `allowedTools` / `disallowedTools` など) だけを SDK の設定に取り出し、残りは
+  > `extraArgs` としてそのまま CLI に渡します。そして
+  > [`base-action/src/run-claude-sdk.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/base-action/src/run-claude-sdk.ts)
+  > が `const { env, extraArgs, ...optionsToLog } = sdkOptions;` としてログから
+  > 除外しています。`--max-budget-usd` はレビューセッション自身が予算を `$2` と
+  > 認識していることでも裏づけが取れています。
 
 > **`CLAUDE_CODE_OAUTH_TOKEN` の露出について。** このワークフローは `pull_request`
 > で走るため、**このリポジトリに push できる人はプルリクエストでワークフローを
