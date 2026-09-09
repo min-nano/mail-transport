@@ -572,6 +572,23 @@ claude setup-token
   ファイルの書き換えも外しています。git の書き込みは、ジョブの `permissions` が
   `contents: read` なので **push が通りません**。
 
+  > **引数までは絞れていません。** `Bash(gh pr comment:*)` の `*` は空白を含む
+  > 任意の文字列に一致するため、`gh pr comment <番号> --body ...` のように
+  > 投稿先を変えた呼び出しもこの規則に一致します。
+  > [公式ドキュメント](https://code.claude.com/docs/en/permissions#wildcard-patterns)も
+  > 引数を制約しようとする Bash の規則は「fragile」だと明記しています。
+  > 旧実装は投稿先の PR 番号を webhook のペイロードから Python 側で確定して
+  > いたので、モデルの出力が投稿先を左右する余地はありませんでした。
+  >
+  > 実際に届く範囲は、`GITHUB_TOKEN` がこのリポジトリに限定されていること
+  > (他リポジトリを指しても認証が通りません) と、`issues: write` を与えて
+  > いないことから、**このリポジトリのプルリクエスト**までです。
+  > またこのワークフローは fork では起動しないので、悪用するには
+  > このリポジトリへの push 権限が要ります。その権限がある人は
+  > ワークフロー自体を書き換えられるため、この経路で増える危険は
+  > 実質ありません。厳密に縛るなら `PreToolUse` フックで引数を検証する
+  > 手がありますが、公式の推奨構成から外れるので採っていません。
+
   **アクションは既定を上乗せしません。** 固定先のコミットで
   [`src/modes/agent/index.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/modes/agent/index.ts)
   を確認したところ、agent モードは `--permission-mode` を設定せず、既定の
