@@ -585,10 +585,14 @@ claude setup-token
 | 下書きから通常に切り替える | `pull_request` (`ready_for_review`) |
 | プルリクエストにコメントする | `issue_comment` |
 | インラインコメントに返信する | `pull_request_review_comment` |
+| 「Review changes」から本文だけのレビューを出す | `pull_request_review` |
 
-コメントでも走るのは、**指摘への対応がコードではなく説明で行われることがある**
-ためです。「これは意図した挙動です」とコメントで返したとき、`synchronize` は
-発生しないので、コードの変更だけを見ていると判定を出し直せません。
+コメントやレビュー本文でも走るのは、**指摘への対応がコードではなく説明で
+行われることがある**ためです。「これは意図した挙動です」と返したとき、
+`synchronize` は発生しないので、コードの変更だけを見ていると判定を出し直せません。
+GitHub の「Review changes」から本文だけのレビューを出した場合は
+`issue_comment` も `pull_request_review_comment` も飛ばないので、
+`pull_request_review` も拾っています。
 
 エージェントには、これまでのレビューとコメントを読んでから判定するよう
 指示しています。解決した指摘は繰り返さず、説明で自分の指摘が誤りだったと
@@ -600,7 +604,7 @@ claude setup-token
 - **bot の投稿** (`github.event.sender.type == 'Bot'`)。自分が出したレビューと
   インラインコメントがそのまま次の実行を呼び、際限なく回るためです。
 - **イシューへのコメント**。`issue_comment` はイシューにも飛んできます。
-- **書き込み権限のない人のコメント**。`gh api repos/…/collaborators/…/permission`
+- **書き込み権限のない人のコメントやレビュー**。`gh api repos/…/collaborators/…/permission`
   で実際の権限を引き、`admin` / `write` / `maintain` 以外は無視します。誰の
   コメントでも走ると、外部の人がコメント本文でエージェントを動かせてしまいます。
 

@@ -9,7 +9,8 @@ name: PR Review
 # 認証はサブスクリプションの OAuth トークンを使う (API のクレジットは使わない)。
 
 # push だけでなく、プルリクエストの変化全般に反応する。指摘への対応が
-# コメントで行われることがあり、その場合 synchronize は発生しないため。
+# コメントやレビュー本文で行われることがあり、その場合 synchronize は
+# 発生しないため。
 # 判定 (承認 / 非承認) を出し直せるように、コメントでも走らせる。
 on:
   pull_request:
@@ -18,6 +19,8 @@ on:
     types: [created, edited]
   pull_request_review_comment:   # インラインコメントへの返信
     types: [created, edited]
+  pull_request_review:      # 「Review changes」からの、本文だけのレビュー提出
+    types: [submitted, edited]
 
 # 同じ PR の実行は最新のものだけ残す。
 concurrency:
@@ -54,10 +57,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-          # コメント起点のときは、書いた人が信用できる場合だけ走らせる。
-          # pull_request 起点では空になるので、その場合は見ない。
-          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
-          COMMENT_ASSOCIATION: ${{ github.event.comment.author_association }}
+          # コメントやレビューが起点のときは、書いた人が信用できる場合だけ
+          # 走らせる。pull_request 起点では空になるので、その場合は見ない。
+          ACTOR_LOGIN: ${{ github.event.comment.user.login || github.event.review.user.login }}
+          ACTOR_ASSOCIATION: ${{ github.event.comment.author_association || github.event.review.author_association }}
         run: |
           skip() {
             echo "::notice::$1"
@@ -73,30 +76,30 @@ jobs:
             exit 0
           fi
 
-          # コメント起点のときは、このリポジトリに書き込める人のコメントだけを
-          # 引き金にする。誰のコメントでも走ると、外部の人が本文でエージェントを
-          # 動かせてしまう。
+          # コメントやレビューが起点のときは、このリポジトリに書き込める人の
+          # ものだけを引き金にする。誰のものでも走ると、外部の人が本文で
+          # エージェントを動かせてしまう。
           #
           # author_association だけでは判定できない。このリポジトリの管理者でも
           # CONTRIBUTOR になることがあり (組織の所属が公開されていない場合など)、
           # それだけを見ると正当な人を黙って弾いてしまう。実際の権限を引く。
-          if [ -n "$COMMENT_AUTHOR" ]; then
-            if perm=$(gh api "repos/$GH_REPO/collaborators/$COMMENT_AUTHOR/permission" \
+          if [ -n "$ACTOR_LOGIN" ]; then
+            if perm=$(gh api "repos/$GH_REPO/collaborators/$ACTOR_LOGIN/permission" \
                         --jq .permission 2>/dev/null); then
               # 権限を引けた。これだけで判断する。association は見ない。
               # 読み取り専用の collaborator は association が COLLABORATOR に
               # なるので、ここで association に落とすと通してしまう。
               case "$perm" in
                 admin|write|maintain) ;;
-                *) skip "書き込み権限のない人のコメントなのでレビューを行いません (permission=$perm)。" ;;
+                *) skip "書き込み権限のない人の投稿なのでレビューを行いません (permission=$perm)。" ;;
               esac
             else
               # 権限を引けなかったときだけ association に頼る。黙って落とすと
               # 機能が働かない理由が分からなくなるので、警告を出す。
-              echo "::warning::書き込み権限を確認できなかったため author_association で判断します (association=$COMMENT_ASSOCIATION)。"
-              case "$COMMENT_ASSOCIATION" in
+              echo "::warning::書き込み権限を確認できなかったため author_association で判断します (association=$ACTOR_ASSOCIATION)。"
+              case "$ACTOR_ASSOCIATION" in
                 OWNER|MEMBER|COLLABORATOR) ;;
-                *) skip "書き込み権限を確認できませんでした (association=$COMMENT_ASSOCIATION)。" ;;
+                *) skip "書き込み権限を確認できませんでした (association=$ACTOR_ASSOCIATION)。" ;;
               esac
             fi
           fi
@@ -117,10 +120,10 @@ jobs:
 
       # checkout は 2 つに分けている。ref を動的に渡さないため。
       #
-      # コメント起点 (issue_comment 等) はシークレットの渡る特権的な文脈なので、
+      # コメントやレビューが起点のときはシークレットの渡る特権的な文脈なので、
       # そこで PR の head を取ると「特権のある文脈で信頼できないコードを
       # checkout している」ことになる (CodeQL: untrusted checkout)。
-      # コメント起点では既定ブランチのままにして、PR の中身は gh pr diff で読む。
+      # その場合は既定ブランチのままにして、PR の中身は gh pr diff で読む。
       - name: PR のブランチを取る
         if: steps.prep.outputs.run == 'true' && github.event_name == 'pull_request'
         uses: actions/checkout@v7
@@ -191,7 +194,8 @@ jobs:
             判断したときは、その旨をレビュー結果に明記してください。
 
             **これまでのやりとりを踏まえてください。**
-            このレビューは push だけでなく、コメントが付いたときにも走ります。
+            このレビューは push だけでなく、コメントやレビューが付いたときにも
+            走ります。
             指摘への対応がコードではなくコメントで行われることがあるためです。
             `gh pr view ${{ steps.prep.outputs.pr_number }} --json comments,reviews`
             で、これまでのレビューとコメントを読んでください。そのうえで:
