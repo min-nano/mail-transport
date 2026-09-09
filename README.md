@@ -523,10 +523,14 @@ Python (`tools/pr_review`) を持っていましたが、保守する量の少�
 向けに示している形 (agent モード) に合わせて**います。
 
 - 差分はエージェントが `gh pr diff` で取得します。
-- 特定の行への指摘は**インラインコメント**として、その行に付きます。
-- 全体の講評は `gh pr comment` で 1 件投稿されます。
+- **指摘はインラインコメントが基本**です。行を特定できるものは、その行に付きます。
+- 行に紐づけられないもの (設計の話、複数ファイルにまたがる指摘、全体の講評) だけを
+  レビュー本文に書きます。
+- 最後に `gh pr review` で**承認 (`--approve`) か非承認 (`--request-changes`) かを
+  提出**します。`[重大]` か `[中]` が 1 件でもあれば非承認、指摘なしか `[軽微]` だけ
+  なら承認です。迷ったときは非承認に倒します。
 
-そのため、**実行ごとにコメントが増えます**。旧実装は目印付きのコメントを 1 つ
+そのため、**実行ごとにレビューが増えます**。旧実装は目印付きのコメントを 1 つ
 書き換え続けていましたが、その挙動は引き継いでいません
 (`use_sticky_comment` は `track_progress` と併用しても実行ごとに新しい
 コメントが作られたため、agent モードに移行した際に外しました)。
@@ -569,6 +573,30 @@ claude setup-token
 > 同じ上限を共有します。大きなプルリクエストが続くと、手元の作業に
 > 影響することがあります。
 
+#### 承認をマージ条件にする
+
+レビューは `gh pr review` で**承認 / 非承認**を提出します。これを取り込みの
+条件にするには、Settings → Branches → `main` の保護ルールで
+**Require a pull request before merging → Require approvals** を有効にします。
+
+いくつか注意点があります。
+
+- **非承認 (`--request-changes`) は取り込みを止めます。** 解除するには、指摘を
+  直して次のレビューで承認されるのを待つか、人が却下 (dismiss) します。同じ
+  レビュアーの最新のレビューが有効なので、次の push で承認されれば解けます。
+- **ボットの承認が必要承認数に数えられるかは、リポジトリ / Organization の
+  設定に依存します。** GitHub Actions のレビューを必要承認数に数えるかどうかの
+  設定が Actions の設定にあり、無効だと `github-actions[bot]` の承認は
+  数えられません。**この点は公式ドキュメントを直接確認できていません**
+  (このセッションからは `docs.github.com` と `github.blog` に到達できませんでした)。
+  数えられない場合は、`GITHUB_TOKEN` の代わりに GitHub App か machine user の
+  PAT を使う必要があります。
+- **レビューが失敗すると、承認も非承認も提出されません。** ステップは
+  `continue-on-error: true` で緑のままですが、承認が付かないので取り込みは
+  止まります。安全側ではありますが、セッションが落ちたときは再実行が要ります。
+- 自分が作成したプルリクエストは承認できません。`github-actions[bot]` が
+  作成した PR では承認が失敗します。
+
 #### 安全側に倒していること
 
 - **エージェントに渡すツールは、差分の取得とコメントの投稿に要るものだけです。**
@@ -576,7 +604,7 @@ claude setup-token
 
   ```
   --allowedTools "mcp__github_inline_comment__create_inline_comment,
-                  Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+                  Bash(gh pr review:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
   --disallowedTools Edit,Write,NotebookEdit,WebFetch,WebSearch
   ```
 
@@ -584,9 +612,9 @@ claude setup-token
   ファイルの書き換えも外しています。git の書き込みは、ジョブの `permissions` が
   `contents: read` なので **push が通りません**。
 
-  > **引数までは絞れていません。** `Bash(gh pr comment:*)` の `*` は空白を含む
-  > 任意の文字列に一致するため、`gh pr comment <番号> --body ...` のように
-  > 投稿先を変えた呼び出しもこの規則に一致します。
+  > **引数までは絞れていません。** `Bash(gh pr review:*)` の `*` は空白を含む
+  > 任意の文字列に一致するため、`gh pr review <番号> --approve ...` のように
+  > 対象を変えた呼び出しもこの規則に一致します。
   > [公式ドキュメント](https://code.claude.com/docs/en/permissions#wildcard-patterns)も
   > 引数を制約しようとする Bash の規則は「fragile」だと明記しています。
   > 旧実装は投稿先の PR 番号を webhook のペイロードから Python 側で確定して
@@ -642,7 +670,7 @@ claude setup-token
 
   > **旧実装より一段弱い点。** 旧実装は `allowed_tools=["Read", "Glob", "Grep"]` で、
   > エージェントに投稿手段を一切与えず、Python 側がコメントを書いていました。
-  > agent モードではエージェント自身が投稿するため、`gh pr comment` と
+  > agent モードではエージェント自身が提出するため、`gh pr review` と
   > インラインコメントのツールが必要になります。公式の推奨構成を採る代わりに
   > 受け入れているトレードオフです。
 
