@@ -386,7 +386,7 @@ def wired(monkeypatch, tmp_path):
         return triage.ModelChoice("claude-opus-5", "xhigh", "危ういため")
 
     monkeypatch.setattr(entry.context, "collect", fake_collect)
-    monkeypatch.setattr(entry.triage, "build_options", lambda: FakeOptions())
+    monkeypatch.setattr(entry.triage, "build_options", FakeOptions)
     monkeypatch.setattr(entry.triage, "choose", fake_choose)
     monkeypatch.setattr(
         entry.reviewer, "build_options", lambda m, e, cwd: FakeOptions(model=m, effort=e)
