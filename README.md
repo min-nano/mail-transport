@@ -608,8 +608,13 @@ claude setup-token
   > `CONTRIBUTOR` になることがあり**(組織の所属が公開されていない場合など)、
   > それだけを見ると正当な人を黙って弾いてしまいます。実際にこのリポジトリで、
   > `role_name: admin` の利用者のコメントが `authorAssociation: CONTRIBUTOR`
-  > になっていました。権限を引けなかったときの保険としてのみ、
-  > `OWNER` / `MEMBER` / `COLLABORATOR` を見ています。
+  > になっていました。
+  >
+  > 逆に、**読み取り専用の collaborator は `COLLABORATOR` になります**。
+  > そのため、権限を引けたときは `author_association` を一切見ません。両方を
+  > 見て「どちらかが通れば可」にすると、読み取り専用の人が通ってしまいます。
+  > `author_association` を見るのは**権限を引けなかったときだけ**で、そのときは
+  > `::warning::` を出して、判断が緩んだことが実行ログに残るようにしています。
 - **fork からのプルリクエスト**。`issue_comment` は base 側の文脈で走り、
   シークレットが渡ってしまうため、`pull_request` の `if` だけでは足りません。
   `gh pr view --json isCrossRepository` で明示的に落としています。

@@ -81,19 +81,24 @@ jobs:
           # CONTRIBUTOR になることがあり (組織の所属が公開されていない場合など)、
           # それだけを見ると正当な人を黙って弾いてしまう。実際の権限を引く。
           if [ -n "$COMMENT_AUTHOR" ]; then
-            perm=$(gh api "repos/$GH_REPO/collaborators/$COMMENT_AUTHOR/permission" \
-                     --jq .permission 2>/dev/null || echo "unknown")
-            case "$perm" in
-              admin|write|maintain) ;;
-              *)
-                # 権限を引けなかったときの保険。association が明確に信用できる
-                # 値ならそれで通す。どちらでも駄目なら走らせない。
-                case "$COMMENT_ASSOCIATION" in
-                  OWNER|MEMBER|COLLABORATOR) ;;
-                  *) skip "書き込み権限のない人のコメントなのでレビューを行いません (permission=$perm, association=$COMMENT_ASSOCIATION)。" ;;
-                esac
-                ;;
-            esac
+            if perm=$(gh api "repos/$GH_REPO/collaborators/$COMMENT_AUTHOR/permission" \
+                        --jq .permission 2>/dev/null); then
+              # 権限を引けた。これだけで判断する。association は見ない。
+              # 読み取り専用の collaborator は association が COLLABORATOR に
+              # なるので、ここで association に落とすと通してしまう。
+              case "$perm" in
+                admin|write|maintain) ;;
+                *) skip "書き込み権限のない人のコメントなのでレビューを行いません (permission=$perm)。" ;;
+              esac
+            else
+              # 権限を引けなかったときだけ association に頼る。黙って落とすと
+              # 機能が働かない理由が分からなくなるので、警告を出す。
+              echo "::warning::書き込み権限を確認できなかったため author_association で判断します (association=$COMMENT_ASSOCIATION)。"
+              case "$COMMENT_ASSOCIATION" in
+                OWNER|MEMBER|COLLABORATOR) ;;
+                *) skip "書き込み権限を確認できませんでした (association=$COMMENT_ASSOCIATION)。" ;;
+              esac
+            fi
           fi
 
           pr=$(gh pr view "$PR_NUMBER" --json state,isCrossRepository,headRefName,isDraft)
