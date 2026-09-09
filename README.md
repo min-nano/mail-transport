@@ -551,6 +551,18 @@ claude setup-token
 別枠で消費するためです。加えて、何かの経路で環境に `ANTHROPIC_API_KEY` が
 残っていても拾われないよう、ステップの `env` で空に上書きしています。
 
+空文字で足りるのは、アクションが truthy 判定をしているからです
+([`base-action/src/validate-env.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/base-action/src/validate-env.ts)
+の `if (!anthropicApiKey && !claudeCodeOAuthToken && ...)`)。キーの存在を見る
+判定ではないので、空文字は「未設定」として扱われます。
+
+> **副作用があります。** `classify_inline_comments` (既定 true) の分類は
+> `ANTHROPIC_API_KEY` を使うため、この上書きによって**動きません**
+> ([`src/entrypoints/post-buffered-inline-comments.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/entrypoints/post-buffered-inline-comments.ts)
+> が `ANTHROPIC_API_KEY not set — skipping classification, posting all unconfirmed comments`
+> と記録します)。バッファされたインラインコメントは選別されずに全部投稿されます。
+> API のクレジットを使わない方針とのトレードオフです。
+
 > **消費するのはトークンを発行した人の枠です。** OAuth トークンは
 > `claude setup-token` を実行した人のサブスクリプションに紐づきます。
 > レビューの使用量はその人の利用枠から引かれ、対話で使う Claude Code と
