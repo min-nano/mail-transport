@@ -104,7 +104,11 @@ jobs:
             fi
           fi
 
-          pr=$(gh pr view "$PR_NUMBER" --json state,isCrossRepository,headRefName,isDraft)
+          # 失敗を吸収する。既定のシェルは -e なので、一時的な API エラー
+          # (レート制限や 5xx) でここが落ちるとステップごと failure になり、
+          # 「レビューの失敗でプルリクエストを赤くしない」方針に反する。
+          pr=$(gh pr view "$PR_NUMBER" --json state,isCrossRepository,isDraft) \
+            || skip "プルリクエストの情報を取得できませんでした。"
           state=$(echo "$pr" | jq -r .state)
           cross=$(echo "$pr" | jq -r .isCrossRepository)
           draft=$(echo "$pr" | jq -r .isDraft)
