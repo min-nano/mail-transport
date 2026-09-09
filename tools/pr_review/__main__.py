@@ -20,8 +20,10 @@ from tools.pr_review import comment, context, reviewer, triage
 
 log = logging.getLogger("pr_review")
 
-OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
-API_KEY_ENV = "ANTHROPIC_API_KEY"
+# 環境変数の「名前」であって値ではない。名前に token / key を含めると、
+# ログ出力に流したときにコード走査が機微情報の流出と誤検出する。
+SUBSCRIPTION_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+API_BILLING_ENV = "ANTHROPIC_API_KEY"
 
 
 def _notice(message: str) -> None:
@@ -46,12 +48,12 @@ def ensure_subscription_auth() -> bool:
     API キーが環境に残っていると、そちらが使われて API のクレジットを
     消費しかねない。警告したうえで環境から外す (子プロセスは環境を継ぐ)。
     """
-    if os.environ.pop(API_KEY_ENV, None):
+    if os.environ.pop(API_BILLING_ENV, None) is not None:
         _warn(
-            f"{API_KEY_ENV} が設定されていましたが、API のクレジットを使わないよう"
-            f"無視します。{OAUTH_TOKEN_ENV} を使ってください。"
+            "ANTHROPIC_API_KEY が設定されていましたが、API のクレジットを"
+            "使わないよう無視します。CLAUDE_CODE_OAUTH_TOKEN を使ってください。"
         )
-    return bool(os.environ.get(OAUTH_TOKEN_ENV))
+    return bool(os.environ.get(SUBSCRIPTION_ENV))
 
 
 async def _review(pr_context, cwd: Path) -> tuple[triage.ModelChoice, reviewer.ReviewResult]:
@@ -73,7 +75,7 @@ def main() -> int:
     if not ensure_subscription_auth():
         # トークンが無いのは「まだ設定していない」だけのことが多い。
         # レビューは必須チェックではないので、赤くせず知らせるにとどめる。
-        _warn(f"{OAUTH_TOKEN_ENV} が未設定のためレビューを行いません。")
+        _warn("CLAUDE_CODE_OAUTH_TOKEN が未設定のためレビューを行いません。")
         return 0
 
     event = _event()
