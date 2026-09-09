@@ -74,6 +74,9 @@ jobs:
           track_progress: true
           use_sticky_comment: true
           display_report: true
+          # TODO: 原因が分かったら false に戻す。既定ではセッションの出力が
+          # 伏せられ、失敗しても理由が分からないため一時的に開けている。
+          show_full_output: true
           prompt: |
             このプルリクエストをレビューしてください。
 
@@ -117,8 +120,13 @@ jobs:
           # 注入する Bash(git add:*) などの規則と噛み合わず、セッションが
           # モデルを呼ぶ前に落ちる (bare の Bash 拒否はツール自体を文脈から
           # 外すため)。--permission-mode も同じくアクション側が管理している。
+          #
+          # --model と --max-turns はログ上 SDK の設定 (model / maxTurns) に
+          # 反映されることを確認済み。--effort と --max-budget-usd は反映が
+          # 確認できていない。アクションは CLI ではなく Agent SDK を呼ぶので、
+          # 対応する設定が無いフラグは無視されるか、あるいは弾かれる。
+          # 費用上限はいま外している (--max-turns で頭打ちにはなる)。
           claude_args: >-
             --model claude-sonnet-5
             --effort xhigh
             --max-turns 40
-            --max-budget-usd 2.0
