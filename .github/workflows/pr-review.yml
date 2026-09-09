@@ -53,6 +53,10 @@ jobs:
         # 付け替えられるため、v1 のままだと中身が黙って変わりうる (CodeQL の
         # 指摘)。更新は Dependabot が # の後ろの版を見て上げてくれる。
         uses: anthropics/claude-code-action@5ccc3a35a6367cdb8e6fbd0728287467540ecfe2 # v1
+        env:
+          # 何かの経路で環境に残っていても拾われないよう、空で上書きする。
+          # 拾われると API のクレジットを別枠で消費しかねない。
+          ANTHROPIC_API_KEY: ""
         with:
           # claude setup-token で発行した、サブスクリプションのトークン。
           # anthropic_api_key は渡さない (別枠のクレジットを消費するため)。
