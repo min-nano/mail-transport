@@ -572,12 +572,24 @@ claude setup-token
   ファイルの書き換えも外しています。git の書き込みは、ジョブの `permissions` が
   `contents: read` なので **push が通りません**。
 
-  **これがツールのすべてです。** 固定先のコミットで
+  **アクションは既定を上乗せしません。** 固定先のコミットで
   [`src/modes/agent/index.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/modes/agent/index.ts)
   を確認したところ、agent モードは `--permission-mode` を設定せず、既定の
   `allowedTools` / `disallowedTools` も注入せず、`github_comment` の MCP サーバも
   追加しません (`claudeCommentId: undefined, // No tracking comment in agent mode`)。
-  上に書いた許可リストがそのまま全体になります。
+
+  **ただし、これがエージェントの持つツールの全部ではありません。**
+  [ツールの一覧](https://code.claude.com/docs/en/tools-reference)のとおり、
+  `Read` / `Glob` / `Grep` は作業ディレクトリ内であれば**許可を要しない**ので、
+  `--allowedTools` に挙げなくても使えます。`Bash` も、Claude Code が
+  読み取り専用と定めた組み込みのコマンドは確認なしで動きます。
+  つまり `--allowedTools` が支配するのは「許可を要するツール」であって、
+  読み取りは別途できます。
+
+  これは意図した状態です。プロンプトで「必要に応じてリポジトリ内の関連ファイルを
+  読んで文脈を確かめてください」と指示している以上、差分の字面だけでなく
+  周辺のコードまで読めなければレビューの質が落ちます。書き込みと外部通信を
+  塞げていることが目的で、読み取りを塞ぐことが目的ではありません。
 
   > **`track_progress` は使いません。**
   > [`src/modes/detector.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/modes/detector.ts)
