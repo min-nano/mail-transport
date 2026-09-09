@@ -433,7 +433,9 @@ def test_an_api_key_in_the_environment_is_removed(wired, monkeypatch, capsys):
     環境に API キーが残っていると、子プロセスがそちらで認証してしまう。
     """
     entry, _ = wired
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-something")
+    # 値の中身は問わないので、実物の鍵の形を模さない文字列にしておく
+    # (資格情報らしき文字列はコード走査に引っかかる)。
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "placeholder-not-a-key")
 
     assert entry.main() == 0
 
