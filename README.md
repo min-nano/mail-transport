@@ -620,6 +620,12 @@ claude setup-token
   周辺のコードまで読めなければレビューの質が落ちます。書き込みと外部通信を
   塞げていることが目的で、読み取りを塞ぐことが目的ではありません。
 
+  外部通信の `WebFetch` / `WebSearch` は許可を要するツールなので、
+  `--allowedTools` に挙げていない時点で拒否されます。それでも
+  `--disallowedTools` に明示的に並べてあります。agent モードはこちらが
+  書いたものしか渡さないので、許可リストから漏れていることだけを頼りに
+  するより、拒否として書いてあるほうが読んで分かるためです。
+
   > **`track_progress` は使いません。**
   > [`src/modes/detector.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/modes/detector.ts)
   > を読むと、`track_progress: true` と `pull_request` イベントの組み合わせでは
