@@ -600,6 +600,13 @@ claude setup-token
   > ワークフロー自体を書き換えられるため、この経路で増える危険は
   > 実質ありません。厳密に縛るなら `PreToolUse` フックで引数を検証する
   > 手がありますが、公式の推奨構成から外れるので採っていません。
+  >
+  > 同じことが `mcp__github_inline_comment__create_inline_comment` の
+  > `confirmed` にも当てはまります。即時投稿を避けるためプロンプトで
+  > 「`confirmed` は指定しないでください」と指示していますが、これは
+  > **指示であって強制ではありません**。許可規則はツール単位までしか
+  > 効かず、引数の値までは縛れないためです。エージェントがこの指示に
+  > 従わなければ、キャンセル時に断片だけが残る状態は起こりえます。
 
   **アクションは既定を上乗せしません。** 固定先のコミットで
   [`src/modes/agent/index.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/modes/agent/index.ts)
