@@ -1,4 +1,4 @@
 # プルリクエストのレビュー用。VM にも普段のテストにも要らない。
-# claude-agent-sdk は Claude Code の実体を同梱する (linux x86_64 の wheel)。
-anthropic==1.4.0
+# Claude Code の実体を同梱する (linux x86_64 の wheel)。
+# 認証はサブスクリプションの OAuth トークンを使うので anthropic SDK は不要。
 claude-agent-sdk==0.2.152

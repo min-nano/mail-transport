@@ -1,6 +1,9 @@
 """GitHub Actions から呼ばれる入口.
 
-python -m tools.pr_review
+  python -m tools.pr_review
+
+認証はサブスクリプションの OAuth トークン (CLAUDE_CODE_OAUTH_TOKEN) を使う。
+API キーを使うと API のクレジットを別途消費してしまうため、意図的に避けている。
 """
 
 from __future__ import annotations
@@ -16,6 +19,9 @@ from pathlib import Path
 from tools.pr_review import comment, context, reviewer, triage
 
 log = logging.getLogger("pr_review")
+
+OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+API_KEY_ENV = "ANTHROPIC_API_KEY"
 
 
 def _notice(message: str) -> None:
@@ -34,13 +40,40 @@ def _event() -> dict:
         return json.load(handle)
 
 
+def ensure_subscription_auth() -> bool:
+    """サブスクリプションの枠だけを使うようにする.
+
+    API キーが環境に残っていると、そちらが使われて API のクレジットを
+    消費しかねない。警告したうえで環境から外す (子プロセスは環境を継ぐ)。
+    """
+    if os.environ.pop(API_KEY_ENV, None):
+        _warn(
+            f"{API_KEY_ENV} が設定されていましたが、API のクレジットを使わないよう"
+            f"無視します。{OAUTH_TOKEN_ENV} を使ってください。"
+        )
+    return bool(os.environ.get(OAUTH_TOKEN_ENV))
+
+
+async def _review(pr_context, cwd: Path) -> tuple[triage.ModelChoice, reviewer.ReviewResult]:
+    choice = await triage.choose(pr_context.summary(), triage.build_options())
+    _notice(f"レビューに {choice.model} (effort={choice.effort}) を使います: {choice.reason}")
+
+    with tempfile.TemporaryDirectory() as workdir:
+        diff_path = Path(workdir) / "pull-request.diff"
+        diff_path.write_text(pr_context.diff, encoding="utf-8")
+
+        options = reviewer.build_options(choice.model, choice.effort, cwd=cwd)
+        result = await reviewer.run(reviewer.build_prompt(pr_context, diff_path), options)
+    return choice, result
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        # 鍵が無いのは「まだ設定していない」だけのことが多い。
+    if not ensure_subscription_auth():
+        # トークンが無いのは「まだ設定していない」だけのことが多い。
         # レビューは必須チェックではないので、赤くせず知らせるにとどめる。
-        _warn("ANTHROPIC_API_KEY が未設定のためレビューを行いません。")
+        _warn(f"{OAUTH_TOKEN_ENV} が未設定のためレビューを行いません。")
         return 0
 
     event = _event()
@@ -65,23 +98,14 @@ def main() -> int:
         _notice("差分が無いためレビューを行いません。")
         return 0
 
-    choice = triage.choose(pr_context.summary())
-    _notice(f"レビューに {choice.model} (effort={choice.effort}) を使います: {choice.reason}")
-
-    with tempfile.TemporaryDirectory() as workdir:
-        diff_path = Path(workdir) / "pull-request.diff"
-        diff_path.write_text(pr_context.diff, encoding="utf-8")
-
-        options = reviewer.build_options(choice.model, choice.effort, cwd=Path.cwd())
-        prompt = reviewer.build_prompt(pr_context, diff_path)
-        result = asyncio.run(reviewer.run(prompt, options))
+    choice, result = asyncio.run(_review(pr_context, Path.cwd()))
 
     if not result.ok:
         _warn(f"レビューセッションが正常終了しませんでした (status={result.status})。")
     if not result.text.strip():
         _warn("レビュー結果が空でした。")
         return 0
-    if result.cost_usd is not None:
+    if result.cost_usd:
         _notice(f"レビューの費用: ${result.cost_usd:.4f}")
 
     if not token:

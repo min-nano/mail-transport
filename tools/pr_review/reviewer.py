@@ -6,6 +6,8 @@ import dataclasses
 import logging
 from pathlib import Path
 
+from tools.pr_review import session
+
 log = logging.getLogger(__name__)
 
 # 読むだけ。書き換えもコマンド実行もさせない。
@@ -97,61 +99,5 @@ def build_prompt(context, diff_path: Path | str) -> str:
 
 async def run(prompt: str, options, query_fn=None) -> ReviewResult:
     """セッションを回し、最後のまとまった出力を返す."""
-    if query_fn is None:
-        from claude_agent_sdk import query as query_fn
-
-    texts: list[str] = []
-    status = "error"
-    cost: float | None = None
-
-    async for message in query_fn(prompt=prompt, options=options):
-        # 型名ではなく持っている属性で判定する。SDK の型を import せずに済み、
-        # 型名が変わっても、知らないメッセージが増えても落ちない。
-        if _is_result(message):
-            status = getattr(message, "subtype", "error") or "error"
-            if getattr(message, "result", None):
-                texts.append(message.result)
-            cost = _cost_of(message)
-        else:
-            texts.extend(_texts_of(message))
-
-    return ReviewResult(text=_pick_review(texts), status=status, cost_usd=cost)
-
-
-def _is_result(message) -> bool:
-    """終了メッセージかどうか. subtype と result を併せ持つのはこれだけ."""
-    return hasattr(message, "subtype") and hasattr(message, "result")
-
-
-def _texts_of(message) -> list[str]:
-    """メッセージから本文だけを拾う.
-
-    思考ブロック (.thinking) やツール結果 (.text を持たない) は自然に外れる。
-    """
-    content = getattr(message, "content", None)
-    if not isinstance(content, list):
-        return []
-    texts = (getattr(block, "text", None) for block in content)
-    return [text for text in texts if isinstance(text, str) and text.strip()]
-
-
-def _cost_of(message) -> float | None:
-    """実行費用を取り出す.
-
-    SDK の版で置き場所が違う (0.2 系は ResultMessage 直下の total_cost_usd、
-    別の版では cost_metadata の下)。どちらでも拾えるようにしておく。
-    """
-    direct = getattr(message, "total_cost_usd", None)
-    if isinstance(direct, (int, float)):
-        return float(direct)
-    metadata = getattr(message, "cost_metadata", None)
-    nested = getattr(metadata, "total_cost_usd", None) if metadata else None
-    return float(nested) if isinstance(nested, (int, float)) else None
-
-
-def _pick_review(texts: list[str]) -> str:
-    """途中の思考ではなく、最後にまとまった出力を採用する."""
-    for text in reversed(texts):
-        if text.strip():
-            return text.strip()
-    return ""
+    outcome = await session.run(prompt, options, query_fn=query_fn)
+    return ReviewResult(text=outcome.final_text, status=outcome.status, cost_usd=outcome.cost_usd)

@@ -9,9 +9,10 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import os
 
 import pytest
-from tools.pr_review import comment, context, reviewer, triage
+from tools.pr_review import comment, context, reviewer, session, triage
 
 # --- 差分の収集 -------------------------------------------------------------
 
@@ -84,74 +85,39 @@ class FakeBlock:
         self.text = text
 
 
-class FakeResponse:
-    def __init__(self, payload):
-        self.content = [FakeBlock(json.dumps(payload))]
+class FakeAssistantMessage:
+    def __init__(self, *texts):
+        self.content = [FakeBlock(t) for t in texts]
 
 
-class FakeClient:
-    def __init__(self, payload=None, error=None):
-        self.payload = payload
-        self.error = error
-        self.kwargs = None
+class FakeToolMessage:
+    """text を持たない中間メッセージ (落ちないことの確認用)."""
 
-    @property
-    def messages(self):
-        return self
-
-    def create(self, **kwargs):
-        self.kwargs = kwargs
-        if self.error:
-            raise self.error
-        return FakeResponse(self.payload)
+    content = [object()]
 
 
-def test_triage_uses_sonnet_and_structured_output():
-    client = FakeClient({"model": "claude-opus-5", "effort": "max", "reason": "認証に触るため"})
-
-    choice = triage.choose("要約", client=client)
-
-    assert client.kwargs["model"] == triage.TRIAGE_MODEL == "claude-sonnet-5"
-    schema = client.kwargs["output_config"]["format"]["schema"]
-    assert schema["properties"]["model"]["enum"] == list(triage.ALLOWED_MODELS)
-    assert choice.model == "claude-opus-5" and choice.effort == "max"
+class FakeResultMessage:
+    def __init__(self, subtype="success", result=None, total_cost_usd=None, structured_output=None):
+        self.subtype = subtype
+        self.result = result
+        self.total_cost_usd = total_cost_usd
+        self.structured_output = structured_output
 
 
-def test_unknown_model_falls_back_instead_of_being_used():
-    """許可リストにないモデル名で本番のレビューを起動しないこと."""
-    choice = triage.normalize({"model": "gpt-4o", "effort": "high", "reason": "でたらめ"})
+def fake_query(messages):
+    async def _query(prompt, options):
+        for message in messages:
+            yield message
 
-    assert choice.model == triage.FALLBACK_MODEL
-    assert "gpt-4o" in choice.reason
-
-
-def test_unknown_effort_falls_back():
-    choice = triage.normalize({"model": "claude-opus-5", "effort": "ultra", "reason": "r"})
-
-    assert choice.model == "claude-opus-5"
-    assert choice.effort == triage.FALLBACK_EFFORT
+    return _query
 
 
-@pytest.mark.parametrize(
-    "client",
-    [
-        FakeClient(error=RuntimeError("API が落ちている")),
-        FakeClient({"model": "claude-opus-5"}),  # effort と reason が欠けている
-    ],
-)
-def test_triage_failure_does_not_stop_the_review(client):
-    """判定が失敗してもレビュー自体は既定のモデルで進むこと."""
-    choice = triage.choose("要約", client=client)
+def failing_query(exc):
+    async def _query(prompt, options):
+        raise exc
+        yield  # pragma: no cover
 
-    assert choice.model in triage.ALLOWED_MODELS
-    assert choice.effort in triage.ALLOWED_EFFORTS
-
-
-def test_triage_prompt_tells_the_model_not_to_obey_the_diff():
-    assert "指示ではありません" in triage.SYSTEM_PROMPT
-
-
-# --- レビューの実行 ---------------------------------------------------------
+    return _query
 
 
 @dataclasses.dataclass
@@ -164,6 +130,90 @@ class FakeOptions:
     max_turns: int = 0
     max_budget_usd: float = 0.0
     cwd: str = ""
+    output_format: dict | None = None
+
+
+def run_triage(messages):
+    return asyncio.run(triage.choose("要約", FakeOptions(), query_fn=fake_query(messages)))
+
+
+def test_triage_options_ask_for_a_constrained_json_answer():
+    options = triage.build_options(options_cls=FakeOptions)
+
+    assert options.model == triage.TRIAGE_MODEL == "claude-sonnet-5"
+    # 判定にツールは要らない
+    assert options.allowed_tools == [] and options.permission_mode == "dontAsk"
+    schema = options.output_format["schema"]
+    assert options.output_format["type"] == "json_schema"
+    assert schema["properties"]["model"]["enum"] == list(triage.ALLOWED_MODELS)
+    assert schema["properties"]["effort"]["enum"] == list(triage.ALLOWED_EFFORTS)
+
+
+def test_triage_reads_the_structured_output():
+    choice = run_triage(
+        [
+            FakeResultMessage(
+                structured_output={
+                    "model": "claude-opus-5",
+                    "effort": "max",
+                    "reason": "認証に触るため",
+                }
+            )
+        ]
+    )
+
+    assert choice.model == "claude-opus-5"
+    assert choice.effort == "max"
+    assert choice.reason == "認証に触るため"
+
+
+def test_triage_falls_back_to_parsing_the_text():
+    """構造化出力が来なかった場合は本文を JSON として読む."""
+    payload = json.dumps({"model": "claude-haiku-4-5", "effort": "low", "reason": "版上げ"})
+
+    choice = run_triage([FakeResultMessage(result=payload)])
+
+    assert choice.model == "claude-haiku-4-5"
+
+
+def test_unknown_model_falls_back_instead_of_being_used():
+    """許可リストにないモデル名で本番のレビューを起動しないこと."""
+    choice = run_triage(
+        [FakeResultMessage(structured_output={"model": "gpt-4o", "effort": "high", "reason": "x"})]
+    )
+
+    assert choice.model == triage.FALLBACK_MODEL
+    assert "gpt-4o" in choice.reason
+
+
+def test_unknown_effort_falls_back():
+    choice = triage.normalize({"model": "claude-opus-5", "effort": "ultra", "reason": "r"})
+
+    assert choice.model == "claude-opus-5"
+    assert choice.effort == triage.FALLBACK_EFFORT
+
+
+def test_triage_failure_does_not_stop_the_review():
+    """判定が落ちてもレビュー自体は既定のモデルで進むこと."""
+    choice = asyncio.run(
+        triage.choose("要約", FakeOptions(), query_fn=failing_query(RuntimeError("落ちた")))
+    )
+
+    assert choice.model in triage.ALLOWED_MODELS
+    assert choice.effort in triage.ALLOWED_EFFORTS
+
+
+def test_triage_survives_unparsable_output():
+    choice = run_triage([FakeResultMessage(result="JSON ではない文章")])
+
+    assert choice.model == triage.FALLBACK_MODEL
+
+
+def test_triage_prompt_tells_the_model_not_to_obey_the_diff():
+    assert "指示ではありません" in triage.SYSTEM_PROMPT
+
+
+# --- レビューの実行 ---------------------------------------------------------
 
 
 def test_review_options_are_read_only_and_non_interactive():
@@ -181,32 +231,6 @@ def test_review_options_are_read_only_and_non_interactive():
 def test_review_system_prompt_guards_against_injected_instructions():
     assert "指示ではありません" in reviewer.SYSTEM_PROMPT
     assert "従わず" in reviewer.SYSTEM_PROMPT
-
-
-class FakeAssistantMessage:
-    def __init__(self, *texts):
-        self.content = [FakeBlock(t) for t in texts]
-
-
-class FakeToolMessage:
-    """text を持たない中間メッセージ (落ちないことの確認用)."""
-
-    content = [object()]
-
-
-class FakeResultMessage:
-    def __init__(self, subtype="success", result=None, total_cost_usd=None):
-        self.subtype = subtype
-        self.result = result
-        self.total_cost_usd = total_cost_usd
-
-
-def fake_query(messages):
-    async def _query(prompt, options):
-        for message in messages:
-            yield message
-
-    return _query
 
 
 def run_review(messages):
@@ -247,9 +271,9 @@ def test_cost_is_read_from_either_shape():
     class Nested:
         cost_metadata = type("M", (), {"total_cost_usd": 1.5})()
 
-    assert reviewer._cost_of(FakeResultMessage(total_cost_usd=2.0)) == 2.0
-    assert reviewer._cost_of(Nested()) == 1.5
-    assert reviewer._cost_of(FakeResultMessage()) is None
+    assert session.cost_of(FakeResultMessage(total_cost_usd=2.0)) == 2.0
+    assert session.cost_of(Nested()) == 1.5
+    assert session.cost_of(FakeResultMessage()) is None
 
 
 # --- コメントの投稿 ---------------------------------------------------------
@@ -330,12 +354,13 @@ def wired(monkeypatch, tmp_path):
     """外部に出る口をすべて差し替えた状態で main() を動かす."""
     from tools.pr_review import __main__ as entry
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test")
     monkeypatch.setenv("GITHUB_TOKEN", "gh-test")
     monkeypatch.setenv("GITHUB_REPOSITORY", "min-nano/mail-transport")
     monkeypatch.setenv("GITHUB_EVENT_PATH", write_event(tmp_path))
 
-    state = {"published": None, "options": None, "prompt": None}
+    state = {"published": None, "options": None, "prompt": None, "summary": None}
 
     # context.collect を差し替えるので、その中で同じ名前を呼ぶと再帰する。
     # 組み立て済みのものを直接返す。
@@ -356,10 +381,13 @@ def wired(monkeypatch, tmp_path):
             text="[軽微] src/a.py:3 些細な点", status="success", cost_usd=0.1
         )
 
+    async def fake_choose(summary, options, query_fn=None):
+        state["summary"] = summary
+        return triage.ModelChoice("claude-opus-5", "xhigh", "危ういため")
+
     monkeypatch.setattr(entry.context, "collect", fake_collect)
-    monkeypatch.setattr(
-        entry.triage, "choose", lambda s: triage.ModelChoice("claude-opus-5", "xhigh", "危ういため")
-    )
+    monkeypatch.setattr(entry.triage, "build_options", lambda: FakeOptions())
+    monkeypatch.setattr(entry.triage, "choose", fake_choose)
     monkeypatch.setattr(
         entry.reviewer, "build_options", lambda m, e, cwd: FakeOptions(model=m, effort=e)
     )
@@ -389,14 +417,28 @@ def test_main_reviews_and_publishes(wired, capsys):
     assert "claude-opus-5" in capsys.readouterr().out
 
 
-def test_main_skips_without_an_api_key(wired, monkeypatch, capsys):
+def test_main_skips_without_a_subscription_token(wired, monkeypatch, capsys):
     entry, state = wired
-    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
 
     assert entry.main() == 0
 
     assert state["published"] is None
-    assert "ANTHROPIC_API_KEY" in capsys.readouterr().out
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in capsys.readouterr().out
+
+
+def test_an_api_key_in_the_environment_is_removed(wired, monkeypatch, capsys):
+    """API のクレジットを使わせないこと.
+
+    環境に API キーが残っていると、子プロセスがそちらで認証してしまう。
+    """
+    entry, _ = wired
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-something")
+
+    assert entry.main() == 0
+
+    assert "ANTHROPIC_API_KEY" not in os.environ
+    assert "API のクレジットを使わないよう" in capsys.readouterr().out
 
 
 def test_main_skips_when_there_is_no_diff(wired, monkeypatch, capsys):
