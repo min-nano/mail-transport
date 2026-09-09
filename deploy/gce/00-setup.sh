@@ -28,21 +28,38 @@ else
   echo "    既に存在します"
 fi
 
+# 実行用サービスアカウントに、このシークレットの読み取りだけを許可する。
+# VM を作り直しても SA は変わらないが、何度呼んでも害はない。
+grant_secret_access() {
+  gcloud secrets add-iam-policy-binding "$1" \
+    --member="serviceAccount:${RUNTIME_SA}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null
+}
+
+secret_exists() {
+  gcloud secrets describe "$1" >/dev/null 2>&1
+}
+
 put_secret() {
   local name="$1" file="$2"
-  if ! gcloud secrets describe "${name}" >/dev/null 2>&1; then
+  if ! secret_exists "${name}"; then
     gcloud secrets create "${name}" --replication-policy=automatic
   fi
   gcloud secrets versions add "${name}" --data-file="${file}" >/dev/null
-  # この 1 つのシークレットの読み取りだけを許可する
-  gcloud secrets add-iam-policy-binding "${name}" \
-    --member="serviceAccount:${RUNTIME_SA}" \
-    --role="roles/secretmanager.secretAccessor" >/dev/null
+  grant_secret_access "${name}"
   echo "    シークレット ${name} を更新しました"
 }
 
+# 中身が既にあるなら触らない。VM を作り直すたびにパスワードを聞かれると
+# 「コマンド一発で再現」ができなくなるため。入れ替えたいときは
+# ROTATE_SECRETS=true を付ける。
+ROTATE_SECRETS="${ROTATE_SECRETS:-false}"
+
 echo "==> シークレットを登録します"
-if [[ -n "${ICLOUD_APP_PASSWORD_FILE:-}" ]]; then
+if secret_exists "icloud-app-password" && [[ "${ROTATE_SECRETS}" != "true" ]]; then
+  grant_secret_access "icloud-app-password"
+  echo "    シークレット icloud-app-password は登録済みです (入れ替えるなら ROTATE_SECRETS=true)"
+elif [[ -n "${ICLOUD_APP_PASSWORD_FILE:-}" ]]; then
   put_secret "icloud-app-password" "${ICLOUD_APP_PASSWORD_FILE}"
 else
   read -r -s -p "iCloud のアプリ用パスワード (xxxx-xxxx-xxxx-xxxx): " icloud_pw
@@ -54,11 +71,14 @@ else
 fi
 
 GMAIL_OAUTH_FILE="${GMAIL_OAUTH_FILE:-gmail_oauth.json}"
-if [[ -f "${GMAIL_OAUTH_FILE}" ]]; then
+if secret_exists "gmail-oauth" && [[ "${ROTATE_SECRETS}" != "true" ]]; then
+  grant_secret_access "gmail-oauth"
+  echo "    シークレット gmail-oauth は登録済みです (入れ替えるなら ROTATE_SECRETS=true)"
+elif [[ -f "${GMAIL_OAUTH_FILE}" ]]; then
   put_secret "gmail-oauth" "${GMAIL_OAUTH_FILE}"
 else
-  echo "    ${GMAIL_OAUTH_FILE} が見つかりません。"
-  echo "    tools/get_gmail_refresh_token.py で作成してから再実行してください。"
+  echo "    ${GMAIL_OAUTH_FILE} が見つかりません。" >&2
+  echo "    tools/get_gmail_refresh_token.py で作成してから再実行してください。" >&2
   exit 1
 fi
 

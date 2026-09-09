@@ -132,17 +132,59 @@ python tools/get_gmail_refresh_token.py \
 
 ## 3. デプロイ
 
+設定を書いたら、**あとは 1 コマンド**です。
+
 ```bash
 cp deploy/config.env.example deploy/config.env
 $EDITOR deploy/config.env        # PROJECT_ID と ICLOUD_USERNAME を書き換える
 
-./deploy/gce/00-setup.sh         # API 有効化 / サービスアカウント / シークレット登録
-./deploy/gce/10-create-vm.sh     # e2-micro を作成 (無料枠から外れる設定は警告)
-./deploy/gce/20-deploy-app.sh    # コード転送 + systemd サービスとして起動
+./deploy/provision.sh
 ```
 
-アプリを更新したいときは `20-deploy-app.sh` をもう一度流すだけです
-(転送 → 再インストール → サービス再起動まで行います)。
+`provision.sh` が次を順に実行します。**何度実行しても同じ結果になります**
+(冪等) 。既にあるものは作り直さず、足りないものだけを作ります。
+
+| | 内容 | 冪等性 |
+|---|---|---|
+| 1 | `gce/00-setup.sh` — API 有効化 / サービスアカウント / シークレット | 登録済みのシークレットは触りません。入れ替えるときは `--rotate-secrets` |
+| 2 | `gce/10-create-vm.sh` — e2-micro を作成 | 既にあれば何もしません。無料枠から外れる設定は作成前に警告します |
+| 3 | `ci/00-setup-wif.sh` — Workload Identity と **VM 単位の IAM** | `--skip-ci` で省略可 |
+| 4 | `gce/20-deploy-app.sh` — コード転送と systemd 起動 | 毎回入れ替えて再起動します |
+
+3 を VM 作成の**後**に実行しているのには理由があります。CI 用の
+`roles/compute.osAdminLogin` と `roles/iap.tunnelResourceAccessor` は
+インスタンスに紐づくので、**VM を作り直すと一緒に消えます**。
+`provision.sh` はこの付け直しまで面倒を見ます。
+
+主なオプション:
+
+```bash
+./deploy/provision.sh --skip-ci          # CI を使わない (WIF の設定を省く)
+./deploy/provision.sh --rotate-secrets   # シークレットを入れ替える
+./deploy/provision.sh --yes              # 確認を求めない
+./deploy/provision.sh --help
+```
+
+アプリだけを更新したいときは `./deploy/gce/20-deploy-app.sh` を単独で流せます。
+
+### VM を作り直す
+
+```bash
+./deploy/gce/90-delete-vm.sh                                   # 退避してから削除
+./deploy/provision.sh --state-db deploy/state-backup/state.db  # 作り直して引き継ぐ
+```
+
+`90-delete-vm.sh` は削除前にサービスを止め、**同期位置 (`state.db`) を手元に
+退避**します。これを `--state-db` で渡すと、作り直した VM が続きから転送を
+再開します。渡さないと新しい VM は「起動時点より後のメール」しか転送せず、
+停止していた間に届いたぶんを取りこぼします。
+
+引き継ぎは **VM 側に `state.db` が無いときだけ**行われます。稼働中の VM に
+`--state-db` 付きで流しても、動いている DB を上書きすることはありません
+(上書きすると転送済みのメールを取り込み直してしまうため)。
+
+削除するのは VM だけです。サービスアカウント・シークレット・
+Workload Identity・ファイアウォール規則は残るので、作り直しは早く済みます。
 
 動作確認:
 
