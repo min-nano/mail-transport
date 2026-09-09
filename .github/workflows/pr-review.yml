@@ -105,7 +105,6 @@ jobs:
           state=$(echo "$pr" | jq -r .state)
           cross=$(echo "$pr" | jq -r .isCrossRepository)
           draft=$(echo "$pr" | jq -r .isDraft)
-          head_ref=$(echo "$pr" | jq -r .headRefName)
 
           [ "$state" = "OPEN" ] || skip "プルリクエストが $state なのでレビューを行いません。"
           # fork にはシークレットを渡せない。コメント起点だと base 側の文脈で
@@ -115,14 +114,20 @@ jobs:
 
           echo "run=true" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
 
-      # コメント起点のときは既定で base ブランチが出てくるので、
-      # 明示的に PR の head を取る。
-      - uses: actions/checkout@v7
-        if: steps.prep.outputs.run == 'true'
-        with:
-          ref: ${{ steps.prep.outputs.head_ref }}
+      # checkout は 2 つに分けている。ref を動的に渡さないため。
+      #
+      # コメント起点 (issue_comment 等) はシークレットの渡る特権的な文脈なので、
+      # そこで PR の head を取ると「特権のある文脈で信頼できないコードを
+      # checkout している」ことになる (CodeQL: untrusted checkout)。
+      # コメント起点では既定ブランチのままにして、PR の中身は gh pr diff で読む。
+      - name: PR のブランチを取る
+        if: steps.prep.outputs.run == 'true' && github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+
+      - name: 既定ブランチを取る
+        if: steps.prep.outputs.run == 'true' && github.event_name != 'pull_request'
+        uses: actions/checkout@v7
 
       - name: レビューする
         if: steps.prep.outputs.run == 'true'
@@ -156,16 +161,24 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ steps.prep.outputs.pr_number }}
 
-            このプルリクエストをレビューしてください。PR のブランチは
-            作業ディレクトリにチェックアウト済みです。差分は
+            このプルリクエストをレビューしてください。差分は
             `gh pr diff ${{ steps.prep.outputs.pr_number }}` のように
             **必ず PR 番号を付けて**取得してください
             (`gh pr view` / `gh pr review` も同じです)。番号を省くと `gh` は
             現在のブランチから対象を推測しますが、起動のきっかけによっては
             推測できず `could not determine current branch` で失敗します。
             番号を付けておけば、どう起動されても確実です。
-            必要に応じてリポジトリ内の関連ファイルを
-            読んで文脈を確かめてください。
+
+            **作業ディレクトリは PR のブランチとは限りません。**
+            push で起動したときは PR の内容ですが、コメントで起動したときは
+            既定ブランチです (特権のある文脈で PR のコードを checkout しない
+            ようにしているため)。したがって:
+
+            - **この PR が変更したファイルの内容は、必ず `gh pr diff` で
+              確かめてください。** 作業ディレクトリのそのファイルを読むと、
+              変更前の内容を見てしまうことがあります。
+            - PR が変更していないファイルは、どちらの場合も同じなので、
+              文脈を確かめるために読んで構いません。
 
             `gh pr diff` は GitHub の diff API 経由なので、非常に大きな PR では
             出力が途中で切れることがあります。出力が不完全に見えるとき
