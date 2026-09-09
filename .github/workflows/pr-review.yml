@@ -16,6 +16,8 @@ on:
 concurrency:
   group: pr-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
+# キャンセルは日常的に起きるので、インラインコメントは即時投稿させず
+# セッション終了時のバッファ投稿に任せている (プロンプトを参照)。
 
 permissions:
   contents: read
@@ -94,8 +96,11 @@ jobs:
 
             投稿の仕方:
             - 特定の行に対する指摘は
-              `mcp__github_inline_comment__create_inline_comment` を
-              `confirmed: true` で使い、その行に付けてください。
+              `mcp__github_inline_comment__create_inline_comment` で
+              その行に付けてください。`confirmed` は指定しないでください
+              (指定すると即時投稿になります。既定のバッファ投稿に任せると、
+              セッションの終わりにまとめて投稿されるので、途中で実行が
+              キャンセルされたときに断片だけが残りません)。
             - 全体の講評と、指摘が無い場合の「指摘なし」は
               `gh pr comment ${{ github.event.pull_request.number }}` で
               1 件だけ投稿してください。
