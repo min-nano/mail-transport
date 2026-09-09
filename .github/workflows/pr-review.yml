@@ -2,7 +2,8 @@ name: PR Review
 
 # プルリクエストを Claude にレビューさせる。
 # まず Claude Sonnet が変更の規模と性質からモデルを決め、そのモデルで
-# Claude Agent SDK のセッションを回す。
+# レビュー本体のセッションを回す。どちらも Claude Agent SDK 経由で、
+# 認証はサブスクリプションの OAuth トークンを使う (API のクレジットは使わない)。
 
 on:
   pull_request:
@@ -39,6 +40,8 @@ jobs:
 
       - name: レビューする
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # claude setup-token で発行した、サブスクリプションのトークン。
+          # ANTHROPIC_API_KEY は渡さない (別枠のクレジットを消費するため)。
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python -m tools.pr_review

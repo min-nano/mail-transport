@@ -521,12 +521,13 @@ Claude にコードを読ませて指摘をコメントします。
 1. **判定** — `claude-sonnet-5` に、変更ファイルの一覧と増減行数だけを見せて、
    本番のレビューに使うモデルと effort を決めさせます (`tools/pr_review/triage.py`)。
    差分の中身は渡しません。判定に要るのは「どこをどれだけ触ったか」だけで、
-   本文まで渡すと判定自体が高くつくためです。
-2. **レビュー** — 選ばれたモデルで [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk)
-   のセッションを回します (`tools/pr_review/reviewer.py`)。差分を読み、必要なら
-   リポジトリ内の関連ファイルまで辿って文脈を確かめます。
+   本文まで渡すと判定自体が高くつくためです。ツールは渡さず、
+   `output_format` で JSON の形を固定して返させます。
+2. **レビュー** — 選ばれたモデルでセッションを回します (`tools/pr_review/reviewer.py`)。
+   差分を読み、必要ならリポジトリ内の関連ファイルまで辿って文脈を確かめます。
 
-選べるモデルは `claude-haiku-4-5` / `claude-sonnet-5` / `claude-opus-5` です。
+どちらも [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) 経由です。
+選べるモデルは `claude-haiku-4-5` / `claude-sonnet-5` / `claude-opus-5`。
 判定側が許可リストにない名前を返した場合は `claude-sonnet-5` に倒します
 (存在しないモデル名でレビューが落ちるのを防ぐため)。判定そのものが失敗しても
 既定のモデルでレビューは続きます。
@@ -534,11 +535,31 @@ Claude にコードを読ませて指摘をコメントします。
 結果は 1 つのコメントに集約されます。push のたびに新しいコメントを積まず、
 目印付きの既存コメントを書き換えます。
 
-#### 設定
+#### 設定 — サブスクリプションの枠を使う
 
-Settings → Secrets and variables → Actions → Secrets に `ANTHROPIC_API_KEY` を
-登録するだけです。未設定のあいだはレビューを行わず、警告を出して素通りします
+**API のクレジットは使いません。** 手元で次を実行して、サブスクリプション
+(Pro / Max / Team / Enterprise) のトークンを発行します。
+
+```bash
+claude setup-token
+```
+
+出力されたトークンを Settings → Secrets and variables → Actions → Secrets に
+`CLAUDE_CODE_OAUTH_TOKEN` として登録してください
+([認証のドキュメント](https://code.claude.com/docs/en/authentication))。
+
+未設定のあいだはレビューを行わず、警告を出して素通りします
 (必須チェックではないので、設定前のプルリクエストを赤くしません)。
+
+`ANTHROPIC_API_KEY` は**意図的に渡していません**。万一環境に残っていた場合は、
+警告を出したうえで実行前に環境から取り除きます (子プロセスが環境を継ぐため、
+残っているとそちらで認証して API のクレジットを消費しかねません)。
+
+> **消費するのはトークンを発行した人の枠です。** OAuth トークンは
+> `claude setup-token` を実行した人のサブスクリプションに紐づきます。
+> レビューの使用量はその人の利用枠から引かれ、対話で使う Claude Code と
+> 同じ上限を共有します。大きなプルリクエストが続くと、手元の作業に
+> 影響することがあります。
 
 #### 安全側に倒していること
 
@@ -551,16 +572,17 @@ Settings → Secrets and variables → Actions → Secrets に `ANTHROPIC_API_KE
   指摘するよう指示しています。判定側にも同じ指示を入れています。
 - **fork からのプルリクエストでは動きません。** シークレットが渡らないためです
   (落として赤くするのではなく、そもそも起動しません)。
-- **費用に上限があります。** `max_budget_usd` と `max_turns` で 1 回のレビューを
-  頭打ちにしています (`tools/pr_review/reviewer.py`)。実際にかかった額は
-  ジョブのログに出ます。
+- **1 回のレビューに上限があります。** `max_turns` と `max_budget_usd` で
+  頭打ちにしています (`tools/pr_review/reviewer.py`)。
 
-> **`ANTHROPIC_API_KEY` の露出について。** このワークフローは `pull_request` で
-> 走るため、**このリポジトリに push できる人はプルリクエストでワークフローを
-> 書き換えて鍵を読み出せます**。これは GitHub Actions でシークレットを使う限り
-> 避けられない性質です (WIF のようにブランチで縛る仕組みが API キーにはありません)。
-> 気になる場合は、このリポジトリ専用の API キーを発行し、
-> [Console](https://platform.claude.com/) で使用上限を低く設定してください。
+> **`CLAUDE_CODE_OAUTH_TOKEN` の露出について。** このワークフローは `pull_request`
+> で走るため、**このリポジトリに push できる人はプルリクエストでワークフローを
+> 書き換えてトークンを読み出せます**。GitHub Actions でシークレットを使う限り
+> 避けられません (WIF のようにブランチで縛る仕組みが、この種のトークンには
+> ありません)。読み出されるとサブスクリプションの枠を使われるため、
+> 心配な場合は
+> [`claude setup-token`](https://code.claude.com/docs/en/authentication)
+> で発行し直せば古いトークンは使えなくなります。
 
 ---
 
