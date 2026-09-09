@@ -42,6 +42,19 @@ rm -rf "${APP_DIR}/build"
 echo "==> 状態ディレクトリを用意します"
 install -d -m 0750 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${STATE_DIR}"
 
+# 同期位置の引き継ぎ。VM を作り直したときだけ復元する。
+# 稼働中の DB を上書きすると転送済みのメールを取り込み直してしまうので、
+# 既にある場合は何もしない。
+if [[ -f "${SRC_DIR}/state.db" ]]; then
+  if [[ -e "${STATE_DIR}/state.db" ]]; then
+    echo "    状態ファイルが既にあるため復元しません"
+  else
+    install -m 0640 -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+      "${SRC_DIR}/state.db" "${STATE_DIR}/state.db"
+    echo "    同期位置を復元しました"
+  fi
+fi
+
 echo "==> 環境設定を ${ENV_FILE} に書き出します"
 install -m 0640 -o root -g "${SERVICE_USER}" "${SRC_DIR}/mail-transport.env" "${ENV_FILE}"
 

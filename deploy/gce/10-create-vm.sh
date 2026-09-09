@@ -21,8 +21,12 @@ case "${REGION}" in
   us-west1|us-central1|us-east1) ;;
   *)
     echo "警告: ${REGION} は Always Free の対象外です (us-west1 / us-central1 / us-east1 のみ)。" >&2
-    read -r -p "課金される可能性がありますが続けますか? [y/N] " answer
-    [[ "${answer}" == "y" || "${answer}" == "Y" ]] || exit 1
+    if [[ "${ASSUME_YES:-false}" == "true" ]]; then
+      echo "    ASSUME_YES=true のため続行します (課金されます)。" >&2
+    else
+      read -r -p "課金される可能性がありますが続けますか? [y/N] " answer
+      [[ "${answer}" == "y" || "${answer}" == "Y" ]] || exit 1
+    fi
     ;;
 esac
 if [[ "${MACHINE_TYPE}" != "e2-micro" ]]; then

@@ -40,6 +40,17 @@ MAX_MESSAGES_PER_RUN=${MAX_MESSAGES_PER_RUN:-40}
 LOG_LEVEL=${LOG_LEVEL:-INFO}
 ENVEOF
 
+# VM を作り直したときに同期位置を引き継ぐ。VM 側に state.db が無いときだけ
+# 復元されるので、稼働中の VM に流しても影響はない。
+if [[ -n "${STATE_DB_FILE:-}" ]]; then
+  if [[ ! -f "${STATE_DB_FILE}" ]]; then
+    echo "STATE_DB_FILE が見つかりません: ${STATE_DB_FILE}" >&2
+    exit 1
+  fi
+  cp "${STATE_DB_FILE}" "${STAGE}/mail-transport/state.db"
+  echo "    同期位置 ${STATE_DB_FILE} を同梱します"
+fi
+
 tar -czf "${STAGE}/mail-transport.tar.gz" -C "${STAGE}" mail-transport
 
 # CI から実行するときは IAP トンネル越しにする (公開 SSH を開けずに済む)
