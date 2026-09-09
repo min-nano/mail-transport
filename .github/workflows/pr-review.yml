@@ -60,7 +60,10 @@ jobs:
 
       - name: レビューする
         if: steps.prep.outputs.run == 'true'
-        uses: anthropics/claude-code-action@v1
+        # サードパーティの action なのでコミットハッシュで固定する。タグは
+        # 付け替えられるため、v1 のままだと中身が黙って変わりうる (CodeQL の
+        # 指摘)。更新は Dependabot が # の後ろの版を見て上げてくれる。
+        uses: anthropics/claude-code-action@5ccc3a35a6367cdb8e6fbd0728287467540ecfe2 # v1
         with:
           # claude setup-token で発行した、サブスクリプションのトークン。
           # anthropic_api_key は渡さない (別枠のクレジットを消費するため)。
