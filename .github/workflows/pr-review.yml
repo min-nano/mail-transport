@@ -257,6 +257,25 @@ jobs:
             - 確信が持てないときは `--request-changes` に倒してください。
               見落として通すほうが高くつきます。
 
+            `--approve` が次のエラーで失敗することがあります。
+
+            ```
+            GitHub Actions is not permitted to approve pull requests.
+            ```
+
+            これはリポジトリの設定 (Settings → Actions → General →
+            Workflow permissions → "Allow GitHub Actions to create and approve
+            pull requests") が無効なためで、こちらでは直せません。その場合は
+            代わりに次で提出し、**本文の先頭に「承認相当 — リポジトリの設定に
+            より approve を提出できません」と明記**してください。
+
+            ```
+            gh pr review ${{ steps.prep.outputs.pr_number }} --comment --body "…"
+            ```
+
+            黙って諦めたり、`--request-changes` に振り替えたりしないでください。
+            指摘が無いのに非承認を出すと、取り込みを不当に止めてしまいます。
+
             `--body` には、行に紐づけられない指摘と、判断の理由を簡潔に
             書いてください。行に付けたインラインコメントの内容を本文に
             繰り返す必要はありません。

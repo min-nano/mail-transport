@@ -644,22 +644,43 @@ checkout を 2 つに分け、`ref` を動的に渡すのをやめました。
 
 #### 承認をマージ条件にする
 
-レビューは `gh pr review` で**承認 / 非承認**を提出します。これを取り込みの
-条件にするには、Settings → Branches → `main` の保護ルールで
-**Require a pull request before merging → Require approvals** を有効にします。
+レビューは `gh pr review` で**承認 / 非承認**を提出します。
+
+> ### 先に必要な設定
+>
+> **このリポジトリでは現在、承認を提出できません。** レビューが実際に
+> `gh pr review --approve` を実行して、次のエラーで失敗することを確認しています。
+>
+> ```
+> failed to create review: GraphQL: GitHub Actions is not permitted to
+> approve pull requests. (addPullRequestReview)
+> ```
+>
+> Settings → Actions → General → Workflow permissions →
+> **"Allow GitHub Actions to create and approve pull requests"** が無効なためです。
+> 有効にするまで、このワークフローは**非承認だけを出せて、承認は絶対にできません**。
+>
+> **この状態で `Require approvals` を有効にしてはいけません。** 一度でも
+> `--request-changes` が出ると、`--approve` が成功しないため、指摘が無くなっても
+> 永久に取り込みが止まります。
+>
+> 当面の回避として、`--approve` が失敗した場合は `--comment` で「承認相当」と
+> 明記して提出するようプロンプトで指示しています。
+
+設定を有効にしたうえで、取り込みの条件にするには、Settings → Branches → `main` の
+保護ルールで **Require a pull request before merging → Require approvals** を
+有効にします。
 
 いくつか注意点があります。
 
 - **非承認 (`--request-changes`) は取り込みを止めます。** 解除するには、指摘を
   直して次のレビューで承認されるのを待つか、人が却下 (dismiss) します。同じ
-  レビュアーの最新のレビューが有効なので、次の push で承認されれば解けます。
-- **ボットの承認が必要承認数に数えられるかは、リポジトリ / Organization の
-  設定に依存します。** GitHub Actions のレビューを必要承認数に数えるかどうかの
-  設定が Actions の設定にあり、無効だと `github-actions[bot]` の承認は
-  数えられません。**この点は公式ドキュメントを直接確認できていません**
-  (このセッションからは `docs.github.com` と `github.blog` に到達できませんでした)。
-  数えられない場合は、`GITHUB_TOKEN` の代わりに GitHub App か machine user の
-  PAT を使う必要があります。
+  レビュアーの最新のレビューが有効なので、次の実行で承認されれば解けます。
+- **ボットの承認が必要承認数に数えられるかは、これとは別の設定に依存します。**
+  承認を提出できることと、それが必要承認数に数えられることは別問題です。
+  **この点は未確認です** (このセッションからは `docs.github.com` と
+  `github.blog` に到達できませんでした)。数えられない場合は、`GITHUB_TOKEN` の
+  代わりに GitHub App か machine user の PAT を使う必要があります。
 - **レビューが失敗すると、承認も非承認も提出されません。** ステップは
   `continue-on-error: true` で緑のままですが、承認が付かないので取り込みは
   止まります。安全側ではありますが、セッションが落ちたときは再実行が要ります。
