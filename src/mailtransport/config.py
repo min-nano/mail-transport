@@ -93,6 +93,8 @@ class Config:
     gmail_auth: GmailAuth
     gmail_user_id: str
     routes: tuple[Route, ...]
+    trash_after_forward: bool
+    trash_mailbox: str
     project_id: str | None
     seen_retention_days: int
     max_messages_per_run: int
@@ -216,6 +218,9 @@ def load_config() -> Config:
         gmail_auth=_parse_gmail_auth(),
         gmail_user_id=_env("GMAIL_USER_ID", "me"),
         routes=_parse_routes(),
+        # 転送が終わったメールは iCloud に残さない (容量を空けるため)
+        trash_after_forward=_env_bool("TRASH_AFTER_FORWARD", True),
+        trash_mailbox=_env("TRASH_MAILBOX", r"\Trash"),
         project_id=_env("GOOGLE_CLOUD_PROJECT") or _env("GCP_PROJECT"),
         seen_retention_days=_env_int("SEEN_RETENTION_DAYS", 30),
         max_messages_per_run=_env_int("MAX_MESSAGES_PER_RUN", 40),

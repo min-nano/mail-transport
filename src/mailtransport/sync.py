@@ -9,7 +9,7 @@ import re
 import time
 
 from mailtransport.config import Config, Route
-from mailtransport.imap_source import ImapSource, MessageMeta, message_id_of
+from mailtransport.imap_source import ImapError, ImapSource, MessageMeta, message_id_of
 from mailtransport.state import MailboxState, StateStore, new_holder_id
 
 log = logging.getLogger(__name__)
@@ -27,8 +27,10 @@ class RouteReport:
     forwarded: int = 0
     duplicates: int = 0
     skipped_too_large: int = 0
+    trashed: int = 0
     remaining: int = 0
     error: str | None = None
+    trash_error: str | None = None
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -45,6 +47,10 @@ class SyncReport:
         return sum(r.forwarded for r in self.routes)
 
     @property
+    def trashed(self) -> int:
+        return sum(r.trashed for r in self.routes)
+
+    @property
     def has_more(self) -> bool:
         """1 回の実行で処理しきれなかったメールが残っているか."""
         return any(r.remaining > 0 for r in self.routes)
@@ -56,6 +62,7 @@ class SyncReport:
     def to_dict(self) -> dict:
         return {
             "forwarded": self.forwarded,
+            "trashed": self.trashed,
             "locked_out": self.locked_out,
             "has_more": self.has_more,
             "duration_seconds": round(self.duration_seconds, 3),
@@ -156,6 +163,9 @@ def _sync_route(
     deadline: float,
 ) -> RouteReport:
     report = RouteReport(source=route.source)
+    # ゴミ箱へ移すには書き込み可能な SELECT が要る。DRY_RUN では iCloud 側を触らない。
+    trashing = config.trash_after_forward and not config.dry_run
+    trash_uids: list[int] = []
     try:
         mailbox = source.resolve_mailbox(route.source)
         if mailbox is None:
@@ -164,7 +174,7 @@ def _sync_route(
             return report
         report.mailbox = mailbox
 
-        uidvalidity, uidnext = source.select(mailbox)
+        uidvalidity, uidnext = source.select(mailbox, readonly=not trashing)
         key = state_key(config.icloud_username, mailbox)
         state = store.get_mailbox_state(key)
 
@@ -183,77 +193,140 @@ def _sync_route(
         report.remaining = len(uids) - len(batch)
         metas = source.fetch_metadata(batch)
 
-        for meta in metas:
-            if time.monotonic() >= deadline:
-                log.info("実行時間の上限に達したため中断します (次回の実行で継続)")
-                report.remaining += len(batch) - batch.index(meta.uid)
-                break
+        try:
+            for meta in metas:
+                if time.monotonic() >= deadline:
+                    log.info("実行時間の上限に達したため中断します (次回の実行で継続)")
+                    report.remaining += len(batch) - batch.index(meta.uid)
+                    break
 
-            if meta.size and meta.size > config.max_message_bytes:
-                log.warning(
-                    "サイズ上限を超えるメールをスキップします",
-                    extra={
-                        "extra_fields": {"uid": meta.uid, "size": meta.size, "mailbox": mailbox}
-                    },
-                )
-                report.skipped_too_large += 1
+                if meta.size and meta.size > config.max_message_bytes:
+                    log.warning(
+                        "サイズ上限を超えるメールをスキップします",
+                        extra={
+                            "extra_fields": {"uid": meta.uid, "size": meta.size, "mailbox": mailbox}
+                        },
+                    )
+                    report.skipped_too_large += 1
+                    _advance(config, store, key, state, meta.uid)
+                    continue
+
+                raw = source.fetch_raw(meta.uid)
+                if raw is None:
+                    _advance(config, store, key, state, meta.uid)
+                    continue
+
+                dkey = dedupe_key(config.icloud_username, raw)
+                if store.is_seen(dkey):
+                    log.info(
+                        "取り込み済みのためスキップします",
+                        extra={"extra_fields": {"uid": meta.uid, "mailbox": mailbox}},
+                    )
+                    report.duplicates += 1
+                    _advance(config, store, key, state, meta.uid)
+                    continue
+
+                labels = _labels_for(route, meta)
+                if config.dry_run:
+                    log.info(
+                        "[DRY_RUN] 転送をスキップしました",
+                        extra={
+                            "extra_fields": {
+                                "uid": meta.uid,
+                                "mailbox": mailbox,
+                                "labels": labels,
+                                "size": meta.size,
+                            }
+                        },
+                    )
+                    report.forwarded += 1
+                    state.last_uid = meta.uid
+                    continue
+
+                result = gmail.insert(raw, labels)
+                # 先に「取り込み済み」を記録してから位置を進める。逆順だと、間で
+                # 落ちたときに同じメールを二重取り込みしてしまう。
+                store.mark_seen(dkey, config.seen_retention_days)
                 _advance(config, store, key, state, meta.uid)
-                continue
-
-            raw = source.fetch_raw(meta.uid)
-            if raw is None:
-                _advance(config, store, key, state, meta.uid)
-                continue
-
-            dkey = dedupe_key(config.icloud_username, raw)
-            if store.is_seen(dkey):
+                report.forwarded += 1
+                if trashing:
+                    # 移動はまとめて 1 コマンドで行うため、ここでは控えるだけにする
+                    trash_uids.append(meta.uid)
                 log.info(
-                    "取り込み済みのためスキップします",
-                    extra={"extra_fields": {"uid": meta.uid, "mailbox": mailbox}},
-                )
-                report.duplicates += 1
-                _advance(config, store, key, state, meta.uid)
-                continue
-
-            labels = _labels_for(route, meta)
-            if config.dry_run:
-                log.info(
-                    "[DRY_RUN] 転送をスキップしました",
+                    "メールを転送しました",
                     extra={
                         "extra_fields": {
                             "uid": meta.uid,
                             "mailbox": mailbox,
                             "labels": labels,
+                            "gmail_message_id": result.message_id,
                             "size": meta.size,
                         }
                     },
                 )
-                report.forwarded += 1
-                state.last_uid = meta.uid
-                continue
-
-            result = gmail.insert(raw, labels)
-            # 先に「取り込み済み」を記録してから位置を進める。逆順だと、間で
-            # 落ちたときに同じメールを二重取り込みしてしまう。
-            store.mark_seen(dkey, config.seen_retention_days)
-            _advance(config, store, key, state, meta.uid)
-            report.forwarded += 1
-            log.info(
-                "メールを転送しました",
-                extra={
-                    "extra_fields": {
-                        "uid": meta.uid,
-                        "mailbox": mailbox,
-                        "labels": labels,
-                        "gmail_message_id": result.message_id,
-                        "size": meta.size,
-                    }
-                },
-            )
+        finally:
+            # 例外や時間切れで抜けても、転送済みのぶんは iCloud から片付ける
+            _move_to_trash(config, source, trash_uids, mailbox, report)
     except Exception as exc:  # 1 経路の失敗で他の経路を止めない
         report.error = f"{type(exc).__name__}: {exc}"
         log.exception("経路 %s の同期に失敗しました", route.source)
     return report
+
+
+def _move_to_trash(
+    config: Config,
+    source: ImapSource,
+    uids: list[int],
+    mailbox: str,
+    report: RouteReport,
+) -> None:
+    """転送し終えたメールを iCloud のゴミ箱へ移す.
+
+    iCloud の容量を空けるための後始末。Gmail への取り込みは済んでいるので、
+    ここで失敗しても転送そのものは成功扱いにする (次回の実行では同期位置が
+    先に進んでいるため、移し損ねたメールは iCloud に残る)。
+    """
+    if not uids:
+        return
+
+    def count(moved: int) -> None:
+        # 分割して送るので、途中で失敗しても移せたぶんは報告に残す
+        report.trashed += moved
+
+    before = report.trashed
+    try:
+        trash = source.resolve_mailbox(config.trash_mailbox)
+        if trash is None:
+            raise ImapError(f"ゴミ箱が見つかりません: {config.trash_mailbox}")
+        if trash == mailbox:
+            raise ImapError(f"ゴミ箱が転送元と同じです: {trash}")
+        source.move_uids(uids, trash, on_moved=count)
+    except Exception as exc:
+        report.trash_error = f"{type(exc).__name__}: {exc}"
+        log.warning(
+            "転送済みメールをゴミ箱へ移しきれませんでした (移せなかったぶんは iCloud に残ります)",
+            extra={
+                "extra_fields": {
+                    "mailbox": mailbox,
+                    "uids": list(uids),
+                    "moved": report.trashed - before,
+                    "error": report.trash_error,
+                }
+            },
+        )
+        return
+    finally:
+        uids.clear()
+    log.info(
+        "転送済みメールをゴミ箱へ移しました",
+        extra={
+            "extra_fields": {
+                "mailbox": mailbox,
+                "trash": trash,
+                "count": report.trashed - before,
+            }
+        },
+    )
 
 
 def _bootstrap(
