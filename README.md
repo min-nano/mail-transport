@@ -513,27 +513,30 @@ ruff は版によって有効な規則が変わるため、`pip install ruff` �
 ### Claude によるプルリクエストのレビュー
 
 [`pr-review.yml`](.github/workflows/pr-review.yml) が、プルリクエストごとに
-Claude にコードを読ませて指摘をコメントします。
+Claude にコードを読ませて指摘をコメントします。公式の
+[`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)
+に載せています。
 
-**モデルは変更ごとに選び直します。** 依存の版上げに重いモデルを使っても仕方が
-なく、認証やデプロイ経路に触る変更を軽いモデルで流すのは危ういためです。
+以前は [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) を直接叩く
+Python (`tools/pr_review`) を持っていましたが、保守する量の少ないほうに寄せました。
+移行にあたっては、旧実装の作りをなぞるのではなく、**公式ドキュメントが自動レビュー
+向けに示している形 (agent モード) に合わせて**います。
 
-1. **判定** — `claude-sonnet-5` に、変更ファイルの一覧と増減行数だけを見せて、
-   本番のレビューに使うモデルと effort を決めさせます (`tools/pr_review/triage.py`)。
-   差分の中身は渡しません。判定に要るのは「どこをどれだけ触ったか」だけで、
-   本文まで渡すと判定自体が高くつくためです。ツールは渡さず、
-   `output_format` で JSON の形を固定して返させます。
-2. **レビュー** — 選ばれたモデルでセッションを回します (`tools/pr_review/reviewer.py`)。
-   差分を読み、必要ならリポジトリ内の関連ファイルまで辿って文脈を確かめます。
+- 差分はエージェントが `gh pr diff` で取得します。
+- **コードの変更だけでなく、プルリクエストの変化全般で走ります。** 指摘への
+  対応がコードではなくコメントで行われることがあり、その場合 `synchronize` は
+  発生しないためです(詳細は後述)。
+- **指摘はインラインコメントが基本**です。行を特定できるものは、その行に付きます。
+- 行に紐づけられないもの (設計の話、複数ファイルにまたがる指摘、全体の講評) だけを
+  レビュー本文に書きます。
+- 最後に `gh pr review` で**承認 (`--approve`) か非承認 (`--request-changes`) かを
+  提出**します。`[重大]` か `[中]` が 1 件でもあれば非承認、指摘なしか `[軽微]` だけ
+  なら承認です。迷ったときは非承認に倒します。
 
-どちらも [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) 経由です。
-選べるモデルは `claude-haiku-4-5` / `claude-sonnet-5` / `claude-opus-5`。
-判定側が許可リストにない名前を返した場合は `claude-sonnet-5` に倒します
-(存在しないモデル名でレビューが落ちるのを防ぐため)。判定そのものが失敗しても
-既定のモデルでレビューは続きます。
-
-結果は 1 つのコメントに集約されます。push のたびに新しいコメントを積まず、
-目印付きの既存コメントを書き換えます。
+そのため、**実行ごとにレビューが増えます**。旧実装は目印付きのコメントを 1 つ
+書き換え続けていましたが、その挙動は引き継いでいません
+(`use_sticky_comment` は `track_progress` と併用しても実行ごとに新しい
+コメントが作られたため、agent モードに移行した際に外しました)。
 
 #### 設定 — サブスクリプションの枠を使う
 
@@ -551,9 +554,21 @@ claude setup-token
 未設定のあいだはレビューを行わず、警告を出して素通りします
 (必須チェックではないので、設定前のプルリクエストを赤くしません)。
 
-`ANTHROPIC_API_KEY` は**意図的に渡していません**。万一環境に残っていた場合は、
-警告を出したうえで実行前に環境から取り除きます (子プロセスが環境を継ぐため、
-残っているとそちらで認証して API のクレジットを消費しかねません)。
+`anthropic_api_key` は**意図的に渡していません**。これを渡すと API のクレジットを
+別枠で消費するためです。加えて、何かの経路で環境に `ANTHROPIC_API_KEY` が
+残っていても拾われないよう、ステップの `env` で空に上書きしています。
+
+空文字で足りるのは、アクションが truthy 判定をしているからです
+([`base-action/src/validate-env.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/base-action/src/validate-env.ts)
+の `if (!anthropicApiKey && !claudeCodeOAuthToken && ...)`)。キーの存在を見る
+判定ではないので、空文字は「未設定」として扱われます。
+
+> **副作用があります。** `classify_inline_comments` (既定 true) の分類は
+> `ANTHROPIC_API_KEY` を使うため、この上書きによって**動きません**
+> ([`src/entrypoints/post-buffered-inline-comments.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/entrypoints/post-buffered-inline-comments.ts)
+> が `ANTHROPIC_API_KEY not set — skipping classification, posting all unconfirmed comments`
+> と記録します)。バッファされたインラインコメントは選別されずに全部投稿されます。
+> API のクレジットを使わない方針とのトレードオフです。
 
 > **消費するのはトークンを発行した人の枠です。** OAuth トークンは
 > `claude setup-token` を実行した人のサブスクリプションに紐づきます。
@@ -561,19 +576,232 @@ claude setup-token
 > 同じ上限を共有します。大きなプルリクエストが続くと、手元の作業に
 > 影響することがあります。
 
+#### いつ走るか
+
+トリガーはすべてプルリクエストに紐づいたイベントです。**`push` トリガーは
+使っていません。** レビューの対象はプルリクエストだけなので、PR の無いブランチへの
+push では走りません。PR のブランチに push したときは、`push` ではなく
+`pull_request` の `synchronize` で起動します。
+
+| きっかけ | イベント |
+|---|---|
+| プルリクエストを開く / 再開する / ブランチに push する | `pull_request` (`opened` / `reopened` / `synchronize`) |
+| 説明文やタイトルを直す | `pull_request` (`edited`) |
+| 下書きから通常に切り替える | `pull_request` (`ready_for_review`) |
+| プルリクエストにコメントする | `issue_comment` |
+| インラインコメントに返信する | `pull_request_review_comment` |
+| 「Review changes」から本文だけのレビューを出す | `pull_request_review` |
+
+コメントやレビュー本文でも走るのは、**指摘への対応がコードではなく説明で
+行われることがある**ためです。「これは意図した挙動です」と返したとき、
+`synchronize` は発生しないので、コードの変更だけを見ていると判定を出し直せません。
+GitHub の「Review changes」から本文だけのレビューを出した場合は
+`issue_comment` も `pull_request_review_comment` も飛ばないので、
+`pull_request_review` も拾っています。
+
+エージェントには、これまでのレビューとコメントを読んでから判定するよう
+指示しています。解決した指摘は繰り返さず、説明で自分の指摘が誤りだったと
+分かればそう認め、いまの状態に対する判定を新しく提出します。判定は最新のものが
+有効になるので、前回が非承認でも解決していれば承認に変わります。
+
+**走らせない場合** — `prep` ステップで次を落としています。
+
+- **bot の投稿** (`github.event.sender.type == 'Bot'`)。自分が出したレビューと
+  インラインコメントがそのまま次の実行を呼び、際限なく回るためです。
+- **イシューへのコメント**。`issue_comment` はイシューにも飛んできます。
+- **書き込み権限のない人のコメントやレビュー**。`gh api repos/…/collaborators/…/permission`
+  で実際の権限を引き、`admin` / `write` / `maintain` 以外は無視します。誰の
+  コメントでも走ると、外部の人がコメント本文でエージェントを動かせてしまいます。
+
+  > `author_association` では判定できません。**このリポジトリの管理者でも
+  > `CONTRIBUTOR` になることがあり**(組織の所属が公開されていない場合など)、
+  > それだけを見ると正当な人を黙って弾いてしまいます。実際にこのリポジトリで、
+  > `role_name: admin` の利用者のコメントが `authorAssociation: CONTRIBUTOR`
+  > になっていました。
+  >
+  > 逆に、**読み取り専用の collaborator は `COLLABORATOR` になります**。
+  > そのため、権限を引けたときは `author_association` を一切見ません。両方を
+  > 見て「どちらかが通れば可」にすると、読み取り専用の人が通ってしまいます。
+  > `author_association` を見るのは**権限を引けなかったときだけ**で、そのときは
+  > `::warning::` を出して、判断が緩んだことが実行ログに残るようにしています。
+- **fork からのプルリクエスト**。`issue_comment` は base 側の文脈で走り、
+  シークレットが渡ってしまうため、`pull_request` の `if` だけでは足りません。
+  `gh pr view --json isCrossRepository` で明示的に落としています。
+- **下書き**、および**閉じられたプルリクエスト**。
+
+> **この設定はマージされるまで効きません。** `issue_comment` と
+> `pull_request_review_comment` は、プルリクエストのブランチではなく
+> **既定ブランチのワークフロー定義**で実行されます。
+
+**コメント起点では PR のコードを checkout しません。** コメント起点はシークレットの
+渡る特権的な文脈なので、そこで PR の head を取ると「特権のある文脈で信頼できない
+コードを checkout している」ことになります(CodeQL の
+`Checkout of untrusted code in a privileged context`)。実際にこの警告を受けたため、
+checkout を 2 つに分け、`ref` を動的に渡すのをやめました。
+
+- **`pull_request` 起点** — `actions/checkout` の既定。PR の内容が作業ディレクトリに
+  入ります。
+- **コメント / レビュー起点** — `actions/checkout` の既定。既定ブランチが入ります。
+
+そのため、**エージェントには「この PR が変更したファイルの内容は必ず `gh pr diff` で
+確かめる」よう指示しています。** 作業ディレクトリのそのファイルを読むと、コメント起点の
+ときは変更前の内容を見てしまうためです。PR が変更していないファイルは、どちらの場合も
+同じなので読んで構いません。
+
+#### 承認をマージ条件にする
+
+レビューは `gh pr review` で**承認 / 非承認**を提出します。
+
+> ### 先に必要な設定
+>
+> Settings → Actions → General → Workflow permissions →
+> **"Allow GitHub Actions to create and approve pull requests"** を有効にしてください。
+> 組織で管理しているリポジトリでは、この項目が組織のポリシーで固定されて灰色に
+> なっていることがあります。その場合は Organization settings → Actions → General
+> で許可します。
+>
+> 無効のままだと `gh pr review --approve` が次のエラーで失敗します。
+>
+> ```
+> failed to create review: GraphQL: GitHub Actions is not permitted to
+> approve pull requests. (addPullRequestReview)
+> ```
+>
+> **非承認だけを出せて、承認は絶対にできない**状態になるので、**この状態で
+> `Require approvals` を有効にしてはいけません。** 一度でも `--request-changes` が
+> 出ると解除できず、指摘が無くなっても永久に取り込みが止まります。
+>
+> 保険として、`--approve` が失敗した場合は `--comment` で「承認相当」と明記して
+> 提出するようプロンプトで指示しています。設定が有効なら使われません。
+
+このリポジトリでは有効化済みで、実地で確認しています。`959c182` に対して
+`state: APPROVED` のレビューが提出され、それまでの `CHANGES_REQUESTED` が解除されて
+`mergeable_state` が `blocked` から外れました。
+
+取り込みの条件にするには、Settings → Branches → `main` の保護ルールで
+**Require a pull request before merging → Require approvals** を有効にします。
+
+いくつか注意点があります。
+
+- **非承認 (`--request-changes`) は取り込みを止めます。** 解除するには、指摘を
+  直して次のレビューで承認されるのを待つか、人が却下 (dismiss) します。同じ
+  レビュアーの最新のレビューが有効なので、次の実行で承認されれば解けます。
+- **ボットの承認が必要承認数に数えられるかは、`Require approvals` を有効にしてから
+  確かめてください。** 承認を提出できることと、それが必要承認数に数えられることは
+  別問題です。承認によって `mergeable_state` が `blocked` から外れることは確認できて
+  いますが、これは `CHANGES_REQUESTED` が解除されたことの確認であって、必要承認数を
+  満たしたことの確認ではありません。数えられない場合は、`GITHUB_TOKEN` の代わりに
+  GitHub App か machine user の PAT を使う必要があります。
+- **レビューが失敗すると、承認も非承認も提出されません。** ステップは
+  `continue-on-error: true` で緑のままですが、承認が付かないので取り込みは
+  止まります。安全側ではありますが、セッションが落ちたときは再実行が要ります。
+- 自分が作成したプルリクエストは承認できません。`github-actions[bot]` が
+  作成した PR では承認が失敗します。
+
 #### 安全側に倒していること
 
-- **エージェントは読むだけ** — 許可しているのは `Read` / `Glob` / `Grep` だけで、
-  `permission_mode: dontAsk` により**それ以外は拒否**されます。ファイルの書き換えも
-  コマンド実行もできません。`WebFetch` や `WebSearch` も渡していないので、
-  読んだ内容を外に送る手段がありません。
+- **エージェントに渡すツールは、差分の取得とコメントの投稿に要るものだけです。**
+  公式ドキュメントの自動レビューの例に合わせています。
+
+  ```
+  --allowedTools "mcp__github_inline_comment__create_inline_comment,
+                  Bash(gh pr review:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+  --disallowedTools Edit,Write,NotebookEdit,WebFetch,WebSearch
+  ```
+
+  `Bash` は `gh pr` の 3 つの形にだけ絞ってあるので、任意のコマンドは実行できません。
+  ファイルの書き換えも外しています。git の書き込みは、ジョブの `permissions` が
+  `contents: read` なので **push が通りません**。
+
+  > **引数までは絞れていません。** `Bash(gh pr review:*)` の `*` は空白を含む
+  > 任意の文字列に一致するため、`gh pr review <番号> --approve ...` のように
+  > 対象を変えた呼び出しもこの規則に一致します。
+  > [公式ドキュメント](https://code.claude.com/docs/en/permissions#wildcard-patterns)も
+  > 引数を制約しようとする Bash の規則は「fragile」だと明記しています。
+  > 旧実装は投稿先の PR 番号を webhook のペイロードから Python 側で確定して
+  > いたので、モデルの出力が投稿先を左右する余地はありませんでした。
+  >
+  > 実際に届く範囲は、`GITHUB_TOKEN` がこのリポジトリに限定されていること
+  > (他リポジトリを指しても認証が通りません) と、`issues: write` を与えて
+  > いないことから、**このリポジトリのプルリクエスト**までです。
+  > またこのワークフローは fork では起動しないので、悪用するには
+  > このリポジトリへの push 権限が要ります。その権限がある人は
+  > ワークフロー自体を書き換えられるため、この経路で増える危険は
+  > 実質ありません。厳密に縛るなら `PreToolUse` フックで引数を検証する
+  > 手がありますが、公式の推奨構成から外れるので採っていません。
+  >
+  > 同じことが `mcp__github_inline_comment__create_inline_comment` の
+  > `confirmed` にも当てはまります。即時投稿を避けるためプロンプトで
+  > 「`confirmed` は指定しないでください」と指示していますが、これは
+  > **指示であって強制ではありません**。許可規則はツール単位までしか
+  > 効かず、引数の値までは縛れないためです。エージェントがこの指示に
+  > 従わなければ、キャンセル時に断片だけが残る状態は起こりえます。
+
+  **アクションは既定を上乗せしません。** 固定先のコミットで
+  [`src/modes/agent/index.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/modes/agent/index.ts)
+  を確認したところ、agent モードは `--permission-mode` を設定せず、既定の
+  `allowedTools` / `disallowedTools` も注入せず、`github_comment` の MCP サーバも
+  追加しません (`claudeCommentId: undefined, // No tracking comment in agent mode`)。
+
+  **ただし、これがエージェントの持つツールの全部ではありません。**
+  [ツールの一覧](https://code.claude.com/docs/en/tools-reference)のとおり、
+  `Read` / `Glob` / `Grep` は作業ディレクトリ内であれば**許可を要しない**ので、
+  `--allowedTools` に挙げなくても使えます。`Bash` も、Claude Code が
+  読み取り専用と定めた組み込みのコマンドは確認なしで動きます。
+  つまり `--allowedTools` が支配するのは「許可を要するツール」であって、
+  読み取りは別途できます。
+
+  これは意図した状態です。プロンプトで「必要に応じてリポジトリ内の関連ファイルを
+  読んで文脈を確かめてください」と指示している以上、差分の字面だけでなく
+  周辺のコードまで読めなければレビューの質が落ちます。書き込みと外部通信を
+  塞げていることが目的で、読み取りを塞ぐことが目的ではありません。
+
+  外部通信の `WebFetch` / `WebSearch` は許可を要するツールなので、
+  `--allowedTools` に挙げていない時点で拒否されます。それでも
+  `--disallowedTools` に明示的に並べてあります。agent モードはこちらが
+  書いたものしか渡さないので、許可リストから漏れていることだけを頼りに
+  するより、拒否として書いてあるほうが読んで分かるためです。
+
+  > **`track_progress` は使いません。**
+  > [`src/modes/detector.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/src/modes/detector.ts)
+  > を読むと、`track_progress: true` と `pull_request` イベントの組み合わせでは
+  > `prompt` を渡していても**無条件に tag モード**になります。tag モードは
+  > `--permission-mode acceptEdits` を設定し、ワークスペース内の書き込みを
+  > 自動で許可します。自動レビューには要らない権限です。
+
+  > **旧実装より一段弱い点。** 旧実装は `allowed_tools=["Read", "Glob", "Grep"]` で、
+  > エージェントに投稿手段を一切与えず、Python 側がコメントを書いていました。
+  > agent モードではエージェント自身が提出するため、`gh pr review` と
+  > インラインコメントのツールが必要になります。公式の推奨構成を採る代わりに
+  > 受け入れているトレードオフです。
+
 - **リポジトリの中身は指示ではなくデータとして扱わせています。** 「レビューを省略しろ」
   といった文がコードやコメントに混ざっていても従わず、そういう記述自体を
-  指摘するよう指示しています。判定側にも同じ指示を入れています。
-- **fork からのプルリクエストでは動きません。** シークレットが渡らないためです
-  (落として赤くするのではなく、そもそも起動しません)。
-- **1 回のレビューに上限があります。** `max_turns` と `max_budget_usd` で
-  頭打ちにしています (`tools/pr_review/reviewer.py`)。
+  指摘するよう `prompt` で指示しています。
+- **レビューの失敗でプルリクエストを赤くしません。** アクションはセッションが
+  失敗すると非ゼロ終了するので、ステップに `continue-on-error: true` を付けて
+  受け止めています。レビューは必須チェックではなく、たまたま落ちたレビューが
+  取り込みを止めるほうが困るためです。失敗したこと自体は実行のログと
+  `::warning::` に残ります。旧実装はセッションが異常終了しても警告だけ出して
+  `exit 0` にしていましたが、例外までは捕まえていなかったので、そこは
+  落ちていました。ここはその挙動より広く受け止めています。
+- **fork からのプルリクエストでは動きません。** `pull_request` では
+  シークレットが渡らないため、そもそも起動しません。コメント起点のときは
+  base 側の文脈で走ってしまうので、`prep` ステップで
+  `isCrossRepository` を見て落としています。
+- **1 回のレビューに上限があります。** `--max-turns` と `--max-budget-usd` で
+  頭打ちにしています。
+
+  > **ジョブログの "SDK options" に `--effort` と `--max-budget-usd` は出ません。**
+  > 効いていないのではなく、ログに出していないだけです。
+  > [`base-action/src/parse-sdk-options.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/base-action/src/parse-sdk-options.ts)
+  > は `claude_args` のうちアクションが自前で扱うもの (`model` / `max-turns` /
+  > `allowedTools` / `disallowedTools` など) だけを SDK の設定に取り出し、残りは
+  > `extraArgs` としてそのまま CLI に渡します。そして
+  > [`base-action/src/run-claude-sdk.ts`](https://github.com/anthropics/claude-code-action/blob/5ccc3a35a6367cdb8e6fbd0728287467540ecfe2/base-action/src/run-claude-sdk.ts)
+  > が `const { env, extraArgs, ...optionsToLog } = sdkOptions;` としてログから
+  > 除外しています。`--max-budget-usd` はレビューセッション自身が予算を `$2` と
+  > 認識していることでも裏づけが取れています。
 
 > **`CLAUDE_CODE_OAUTH_TOKEN` の露出について。** このワークフローは `pull_request`
 > で走るため、**このリポジトリに push できる人はプルリクエストでワークフローを
