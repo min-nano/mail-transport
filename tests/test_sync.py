@@ -638,6 +638,7 @@ def test_mail_arriving_after_the_initial_import_is_trashed(store):
 
 
 def test_existing_mail_can_be_trashed_on_request(store):
+    """取り込みを始める前に立てておけば、既存メールもゴミ箱へ移る."""
     config = make_config(initial_import="all", trash_existing_on_initial_import=True)
     source, inbox, _ = make_source(inbox_msgs=[(1, build_raw("<a@x>"), ())])
     gmail = FakeGmail()
@@ -646,6 +647,29 @@ def test_existing_mail_can_be_trashed_on_request(store):
 
     assert report.trashed == 1
     assert inbox.messages == {}
+
+
+def test_flag_flipped_after_the_import_does_not_reach_forwarded_mail(store):
+    """取り込みが済んだあとで立てても、転送済みのメールには効かない.
+
+    同期位置は 1 通ごとに進むので、転送済みの UID は次の UID SEARCH の範囲に
+    入らない。README にはこの制約 (取り込み前に決めること) を書いてある。
+    """
+    source, inbox, _ = make_source(inbox_msgs=[(1, build_raw("<a@x>"), ())])
+    gmail = FakeGmail()
+    run(make_config(initial_import="all"), store, source, gmail)
+    assert set(inbox.messages) == {1}
+
+    report = run(
+        make_config(initial_import="all", trash_existing_on_initial_import=True),
+        store,
+        source,
+        gmail,
+    )
+
+    assert report.forwarded == 0
+    assert report.trashed == 0
+    assert set(inbox.messages) == {1}
 
 
 # --- 受信トレイへ戻したメール (#24) --------------------------------------

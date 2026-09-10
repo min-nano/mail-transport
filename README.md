@@ -360,7 +360,7 @@ Actions タブから手動実行 (`workflow_dispatch`) もでき、そのとき
 | `TRASH_AFTER_FORWARD` | `true` | 転送が済んだメールを iCloud のゴミ箱へ移す。`false` で iCloud 側に触らない |
 | `TRASH_MAILBOX` | `\Trash` | 移動先。特殊用途フラグかメールボックス名 |
 | `VERIFY_BEFORE_TRASH` | `auto` | ゴミ箱へ移す前に Gmail 側を読み戻して確認する。`auto` / `true` / `false` |
-| `TRASH_EXISTING_ON_INITIAL_IMPORT` | `false` | `INITIAL_IMPORT=all` で取り込んだ既存メールもゴミ箱へ移す |
+| `TRASH_EXISTING_ON_INITIAL_IMPORT` | `false` | `INITIAL_IMPORT=all` で取り込む既存メールもゴミ箱へ移す。**取り込みを始める前に**設定すること |
 | `STATE_BACKEND` | `sqlite` | `sqlite` (ファイル) / `memory` (テスト用) |
 | `STATE_DB_PATH` | `./state.db` | 状態ファイルの場所 (VM では `/var/lib/mail-transport/state.db`) |
 | `IDLE_ENABLED` | `true` | `false` で IDLE を使わず定期ポーリングにする |
@@ -522,10 +522,16 @@ iCloud の無料枠は 5GB しかなく、複製した実体を両側に残す�
 1. `INITIAL_IMPORT=all` で流し、ログの `forwarded` が増えなくなるまで待つ
 2. **Gmail 側で件数とラベルを確認する**
 3. 問題なければ iCloud の受信トレイを手で整理する
-   (自動で移したい場合は `TRASH_EXISTING_ON_INITIAL_IMPORT=true` で流し直す)
 4. `INITIAL_IMPORT` を `none` に戻す
 
 `import_floor` より後に届いた新着メールは、これまでどおり転送後にゴミ箱へ移ります。
+
+> **確認を挟まず自動でゴミ箱へ移したい場合は、取り込みを始める前に**
+> `TRASH_EXISTING_ON_INITIAL_IMPORT=true` にしてください。同期位置は 1 通ごとに
+> 進むので、**取り込みが済んだあとでこの値を変えても、既に転送したメールは
+> 対象になりません** (次の `UID SEARCH` の範囲から外れているため)。あとから
+> 自動で片付ける手段は用意していません。iCloud 側で受信トレイを整理する前に
+> `--leftovers` を確認してください (第 8 章)。
 
 ---
 
@@ -627,8 +633,10 @@ PYTHONPATH=src python -m mailtransport.cli --leftovers
 | `trash_failed` | 転送は済んだがゴミ箱へ移せなかった |
 | `pre_existing` | `INITIAL_IMPORT=all` で取り込んだ、稼働開始前からあったメール |
 
-これらは UID と理由が状態ファイルに記録されます。**iCloud の受信トレイを手で
-空にする前に**、一覧して中身を確認してください。
+これらは UID と理由が状態ファイルに記録され、`--leftovers` は**記録を全件**
+出力します (件数で打ち切ることはしません。一覧に無い＝転送済み、と読めるように
+するためです)。**iCloud の受信トレイを手で空にする前に**、一覧して中身を確認して
+ください。
 
 状態ファイルを読むだけなので、Gmail や iCloud の資格情報は要りません。
 

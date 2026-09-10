@@ -68,3 +68,12 @@ def test_mailbox_state_round_trip_keeps_the_import_floor():
         "last_uid": 2,
         "import_floor": 3,
     }
+
+
+def test_memory_store_also_returns_every_leftover():
+    store = MemoryStateStore()
+    for uid in range(600):
+        store.record_leftover("k", uid, "INBOX", "duplicate")
+
+    assert len(store.list_leftovers("k")) == 600
+    assert len(store.list_leftovers("k", limit=10)) == 10

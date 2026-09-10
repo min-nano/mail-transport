@@ -153,6 +153,19 @@ def test_leftovers_are_recorded_and_listed(store):
     assert len(store.list_leftovers()) == 3
 
 
+def test_leftovers_are_not_silently_truncated(store):
+    """既定で全件返す.
+
+    手で受信トレイを整理する前に見るものなので、黙って切り詰めると
+    「一覧に無い＝転送済み」と読み違えられる。
+    """
+    for uid in range(600):
+        store.record_leftover("k", uid, "INBOX", "duplicate")
+
+    assert len(store.list_leftovers("k")) == 600
+    assert len(store.list_leftovers("k", limit=10)) == 10
+
+
 def test_leftover_is_updated_not_duplicated(store):
     store.record_leftover("k", 1, "INBOX", "unverified")
     store.record_leftover("k", 1, "INBOX", "trash_failed")

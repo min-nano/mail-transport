@@ -100,7 +100,9 @@ class StateStore(Protocol):
         self, key: str, uid: int, mailbox: str, reason: str, detail: str | None = None
     ) -> None: ...
 
-    def list_leftovers(self, key: str | None = None, limit: int = 500) -> list[Leftover]: ...
+    def list_leftovers(
+        self, key: str | None = None, limit: int | None = None
+    ) -> list[Leftover]: ...
 
     def clear_leftovers(self, key: str) -> int: ...
 
@@ -154,10 +156,10 @@ class MemoryStateStore:
             recorded_at=_now().isoformat(),
         )
 
-    def list_leftovers(self, key: str | None = None, limit: int = 500) -> list[Leftover]:
+    def list_leftovers(self, key: str | None = None, limit: int | None = None) -> list[Leftover]:
         rows = [row for row in self._leftovers.values() if key is None or row.key == key]
         rows.sort(key=lambda row: (row.recorded_at, row.uid))
-        return rows[:limit]
+        return rows if limit is None else rows[:limit]
 
     def clear_leftovers(self, key: str) -> int:
         stale = [k for k in self._leftovers if k[0] == key]
@@ -369,14 +371,21 @@ class SqliteStateStore:
                 (key, uid, mailbox, reason, detail, _now().isoformat()),
             )
 
-    def list_leftovers(self, key: str | None = None, limit: int = 500) -> list[Leftover]:
+    def list_leftovers(self, key: str | None = None, limit: int | None = None) -> list[Leftover]:
+        """記録を古い順に返す.
+
+        既定で全件返す。手で受信トレイを整理する前に見るものなので、黙って
+        切り詰めると「一覧に無い＝転送済み」と読み違えられてしまう。
+        """
         sql = "SELECT key, uid, mailbox, reason, detail, recorded_at FROM leftovers"
         params: list = []
         if key is not None:
             sql += " WHERE key = ?"
             params.append(key)
-        sql += " ORDER BY recorded_at, uid LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY recorded_at, uid"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [
