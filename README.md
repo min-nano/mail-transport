@@ -523,8 +523,8 @@ Python (`tools/pr_review`) を持っていましたが、保守する量の少�
 向けに示している形 (agent モード) に合わせて**います。
 
 - 差分はエージェントが `gh pr diff` で取得します。
-- **push だけでなく、プルリクエストの変化全般で走ります。** 指摘への対応が
-  コードではなくコメントで行われることがあり、その場合 `synchronize` は
+- **コードの変更だけでなく、プルリクエストの変化全般で走ります。** 指摘への
+  対応がコードではなくコメントで行われることがあり、その場合 `synchronize` は
   発生しないためです(詳細は後述)。
 - **指摘はインラインコメントが基本**です。行を特定できるものは、その行に付きます。
 - 行に紐づけられないもの (設計の話、複数ファイルにまたがる指摘、全体の講評) だけを
@@ -578,9 +578,14 @@ claude setup-token
 
 #### いつ走るか
 
+トリガーはすべてプルリクエストに紐づいたイベントです。**`push` トリガーは
+使っていません。** レビューの対象はプルリクエストだけなので、PR の無いブランチへの
+push では走りません。PR のブランチに push したときは、`push` ではなく
+`pull_request` の `synchronize` で起動します。
+
 | きっかけ | イベント |
 |---|---|
-| プルリクエストを開く / 再開する / push する | `pull_request` (`opened` / `reopened` / `synchronize`) |
+| プルリクエストを開く / 再開する / ブランチに push する | `pull_request` (`opened` / `reopened` / `synchronize`) |
 | 説明文やタイトルを直す | `pull_request` (`edited`) |
 | 下書きから通常に切り替える | `pull_request` (`ready_for_review`) |
 | プルリクエストにコメントする | `issue_comment` |
@@ -634,8 +639,9 @@ GitHub の「Review changes」から本文だけのレビューを出した場�
 `Checkout of untrusted code in a privileged context`)。実際にこの警告を受けたため、
 checkout を 2 つに分け、`ref` を動的に渡すのをやめました。
 
-- **push 起点** — `actions/checkout` の既定。PR の内容が作業ディレクトリに入ります。
-- **コメント起点** — `actions/checkout` の既定。既定ブランチが入ります。
+- **`pull_request` 起点** — `actions/checkout` の既定。PR の内容が作業ディレクトリに
+  入ります。
+- **コメント / レビュー起点** — `actions/checkout` の既定。既定ブランチが入ります。
 
 そのため、**エージェントには「この PR が変更したファイルの内容は必ず `gh pr diff` で
 確かめる」よう指示しています。** 作業ディレクトリのそのファイルを読むと、コメント起点の
