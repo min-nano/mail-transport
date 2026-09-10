@@ -9,19 +9,50 @@
 
 使い方:
     pip install google-auth-oauthlib
-    python tools/get_gmail_refresh_token.py --client-secret ~/Downloads/client_secret.json
+    python tools/get_gmail_refresh_token.py \
+        --client-secret ~/Downloads/client_secret.json \
+        --out deploy/gmail_oauth.json
 
 出力された JSON をそのまま Secret Manager に登録する。
+client secret とリフレッシュトークンを含むため、標準出力には出さず
+所有者だけが読めるファイル (0600) にのみ書き出す。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 # 取得するのは「挿入」権限のみ。閲覧・変更・送信の権限は要求しない。
 SCOPES = ["https://www.googleapis.com/auth/gmail.insert"]
+
+# 所有者のみ読み書き。秘密情報を置くファイルの権限。
+_SECRET_FILE_MODE = 0o600
+
+
+def write_secret_file(path: str, text: str) -> None:
+    """秘密情報を所有者だけが読めるファイルとして書き出す.
+
+    既定の ``open()`` は umask 次第で他ユーザーにも読めるファイルを作るため、
+    権限を明示して開く。``O_NOFOLLOW`` は、出力先がシンボリックリンクに
+    すり替えられていた場合にリンク先へ書き込んでしまうのを防ぐ
+    (対応していない環境では単に無視される)。
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, _SECRET_FILE_MODE)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
+        # open のモード指定は新規作成時にしか効かない。既存ファイルへ
+        # 上書きするときも、緩い権限のまま秘密情報を置かないよう絞り直す。
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle.fileno(), _SECRET_FILE_MODE)
+        handle.write(text + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,7 +68,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="ブラウザを自動起動せず URL を表示するだけにする",
     )
-    parser.add_argument("--out", required=True, help="結果 JSON の書き出し先")
+    parser.add_argument(
+        "--out",
+        required=True,
+        help="結果 JSON の書き出し先 (0600 で作成される。標準出力には出さない)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -71,8 +106,12 @@ def main(argv: list[str] | None = None) -> int:
         "token_uri": credentials.token_uri,
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2)
-    with open(args.out, "w", encoding="utf-8") as handle:
-        handle.write(text + "\n")
+    try:
+        write_secret_file(args.out, text)
+    except OSError as exc:
+        # 例外の文字列にも秘密情報は入らない (パスと errno だけ)。
+        print(f"{args.out} に書き出せませんでした: {exc}", file=sys.stderr)
+        return 1
     print(f"{args.out} に書き出しました (取り扱い注意)", file=sys.stderr)
     return 0
 

@@ -128,6 +128,11 @@ python tools/get_gmail_refresh_token.py \
 要求するスコープは `https://www.googleapis.com/auth/gmail.insert` **のみ**です。
 メールの閲覧・変更・削除・送信の権限は一切要求しません。
 
+`--out` は必須です。出力される JSON には client secret とリフレッシュトークンが
+入るため、端末やシェルの履歴・ログに残る標準出力へは出さず、所有者だけが読める
+ファイル (`0600`) として書き出します。Secret Manager へ登録したあとは、
+手元のファイルを消しておくと安全です。
+
 ---
 
 ## 3. デプロイ
