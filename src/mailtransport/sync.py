@@ -288,21 +288,28 @@ def _move_to_trash(
     """
     if not uids:
         return
+
+    def count(moved: int) -> None:
+        # 分割して送るので、途中で失敗しても移せたぶんは報告に残す
+        report.trashed += moved
+
+    before = report.trashed
     try:
         trash = source.resolve_mailbox(config.trash_mailbox)
         if trash is None:
             raise ImapError(f"ゴミ箱が見つかりません: {config.trash_mailbox}")
         if trash == mailbox:
             raise ImapError(f"ゴミ箱が転送元と同じです: {trash}")
-        moved = source.move_uids(uids, trash)
+        source.move_uids(uids, trash, on_moved=count)
     except Exception as exc:
         report.trash_error = f"{type(exc).__name__}: {exc}"
         log.warning(
-            "転送済みメールをゴミ箱へ移せませんでした (iCloud に残ります)",
+            "転送済みメールをゴミ箱へ移しきれませんでした (移せなかったぶんは iCloud に残ります)",
             extra={
                 "extra_fields": {
                     "mailbox": mailbox,
                     "uids": list(uids),
+                    "moved": report.trashed - before,
                     "error": report.trash_error,
                 }
             },
@@ -310,10 +317,15 @@ def _move_to_trash(
         return
     finally:
         uids.clear()
-    report.trashed += moved
     log.info(
         "転送済みメールをゴミ箱へ移しました",
-        extra={"extra_fields": {"mailbox": mailbox, "trash": trash, "count": moved}},
+        extra={
+            "extra_fields": {
+                "mailbox": mailbox,
+                "trash": trash,
+                "count": report.trashed - before,
+            }
+        },
     )
 
 

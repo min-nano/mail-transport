@@ -261,3 +261,66 @@ def test_connect_keeps_going_when_capability_fails(monkeypatch):
 
     assert source.has_capability("IDLE") is True  # 接続時のものを使い続ける
     assert source.has_capability("MOVE") is False
+
+
+def test_move_uids_reports_progress_per_chunk():
+    """分割して送るので、途中で失敗しても移せたぶんを呼び出し元に伝える."""
+
+    class FlakyConn(FakeConn):
+        def uid(self, command, *args):
+            self.calls.append((command, args))
+            if len(self.calls) == 2:  # 2 つ目のチャンクで切れる
+                raise OSError("接続が切れました")
+            return ("OK", [b""])
+
+    conn = FlakyConn({}, capabilities=("MOVE",))
+    counted: list[int] = []
+
+    with pytest.raises(OSError):
+        source_with(conn, readonly=False).move_uids(
+            list(range(1, 401)), "Trash", on_moved=counted.append
+        )
+
+    assert counted == [200]  # 1 つ目のチャンクは本当に移動できている
+
+
+class ClosingConn(FakeConn):
+    """CLOSE / UNSELECT / LOGOUT の呼ばれ方だけを見るためのコネクション."""
+
+    def close(self):
+        self.calls.append(("CLOSE", ()))
+
+    def unselect(self):
+        self.calls.append(("UNSELECT", ()))
+
+    def logout(self):
+        self.calls.append(("LOGOUT", ()))
+
+
+def test_close_uses_unselect_after_a_writable_selection():
+    """読み書きで開いた CLOSE は \\Deleted のメールを暗黙に削除してしまう."""
+    conn = ClosingConn({}, capabilities=("UNSELECT",))
+
+    source_with(conn, readonly=False).close()
+
+    assert [command for command, _ in conn.calls] == ["UNSELECT", "LOGOUT"]
+
+
+def test_close_skips_close_when_unselect_is_missing():
+    """UNSELECT が無いなら、何も消さない LOGOUT だけで閉じる.
+
+    UIDPLUS が無くて削除を見送ったメールを、CLOSE で消してしまわないため。
+    """
+    conn = ClosingConn({}, capabilities=("IMAP4REV1",))
+
+    source_with(conn, readonly=False).close()
+
+    assert [command for command, _ in conn.calls] == ["LOGOUT"]
+
+
+def test_close_still_closes_a_readonly_selection():
+    conn = ClosingConn({}, capabilities=("IMAP4REV1",))
+
+    source_with(conn).close()
+
+    assert [command for command, _ in conn.calls] == ["CLOSE", "LOGOUT"]

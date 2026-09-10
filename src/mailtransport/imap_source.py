@@ -153,12 +153,14 @@ class ImapSource:
             return
         try:
             if self._selected:
-                # 読み書きで SELECT していると CLOSE は \Deleted のメールを消してしまう。
-                # 他のクライアントが立てたフラグまで巻き込まないよう UNSELECT を優先する。
-                if not self._selected_readonly and _has_capability(conn, "UNSELECT"):
-                    conn.unselect()
-                else:
+                # 読み書きで開いたときの CLOSE は、\Deleted が立ったメールを無条件に
+                # 削除する。UIDPLUS が無くて削除を見送ったぶんや、他のクライアントが
+                # 立てたフラグまで巻き込むので、何も消さない UNSELECT を使う。
+                # それも無いサーバーでは、何も消さない LOGOUT だけで閉じる。
+                if self._selected_readonly:
                     conn.close()
+                elif _has_capability(conn, "UNSELECT"):
+                    conn.unselect()
         except Exception:  # pragma: no cover - 切断時のエラーは無視してよい
             pass
         finally:
@@ -294,12 +296,16 @@ class ImapSource:
         return None
 
     # --- 移動 (転送後の後始末) ----------------------------------------------
-    def move_uids(self, uids: list[int], destination: str) -> int:
+    def move_uids(self, uids: list[int], destination: str, on_moved=None) -> int:
         """``uids`` を ``destination`` へ移し、移せた通数を返す.
 
         転送済みのメールを iCloud のゴミ箱へ送って容量を空けるために使う。
         RFC 6851 の ``UID MOVE`` があればそれを使い、無ければ COPY してから
         元を削除する。書き込み可能な状態で SELECT していること。
+
+        UID が多いときは分割して送るため、途中で失敗すると戻り値が返らない。
+        そこまでに移せた通数は ``on_moved`` (チャンクごとに通数で呼ばれる) で
+        受け取れる。
         """
         if not uids:
             return 0
@@ -330,6 +336,8 @@ class ImapSource:
                         "(ゴミ箱にコピー済み、元は \\Deleted のまま残ります)"
                     )
             moved += len(chunk)
+            if on_moved is not None:
+                on_moved(len(chunk))
         return moved
 
     # --- IDLE (push 受信) ---------------------------------------------------

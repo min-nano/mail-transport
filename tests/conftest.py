@@ -111,7 +111,7 @@ class FakeImapSource:
         entry = self.selected.messages.get(uid)
         return entry[1] if entry else None
 
-    def move_uids(self, uids: list[int], destination: str) -> int:
+    def move_uids(self, uids: list[int], destination: str, on_moved=None) -> int:
         assert self.selected is not None
         if self.readonly:
             raise AssertionError("読み取り専用で SELECT したまま移動しようとしています")
@@ -126,6 +126,8 @@ class FakeImapSource:
             target.add(target.uidnext, entry[1], entry[0].flags)
             moved += 1
         self.moved.append((list(uids), destination))
+        if on_moved is not None and moved:
+            on_moved(moved)
         return moved
 
 

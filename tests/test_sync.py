@@ -4,6 +4,7 @@ import pytest
 
 from conftest import FakeGmail, FakeImapSource, FakeMailbox, build_raw, make_config
 from mailtransport.config import Route
+from mailtransport.imap_source import ImapError
 from mailtransport.state import MailboxState
 from mailtransport.sync import dedupe_key, state_key, sync_once
 
@@ -402,3 +403,37 @@ def test_dry_run_does_not_move_anything(store):
     assert report.trashed == 0
     assert source.readonly is True
     assert set(inbox.messages) == {1}
+
+
+class HalfMovingSource(FakeImapSource):
+    """前半だけ移し終えたところで切れるサーバー."""
+
+    def move_uids(self, uids, destination, on_moved=None):
+        super().move_uids(uids[: len(uids) // 2], destination, on_moved=on_moved)
+        raise ImapError("移動の途中で接続が切れました")
+
+
+def test_partially_moved_mail_is_counted(store):
+    """途中で失敗しても、移せたぶんは「移した」と報告する.
+
+    まとめて送る UID を分割しているので、前半だけ成功することがある。
+    失敗のひとことで片付けると、ログとレポートが実態とずれる。
+    """
+    config = make_config()
+    inbox, trash = FakeMailbox("INBOX"), FakeMailbox("Deleted Messages")
+    source = HalfMovingSource(
+        {"INBOX": inbox, "Deleted Messages": trash},
+        special_use={r"\Trash": "Deleted Messages"},
+    )
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    inbox.add(2, build_raw("<b@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 2
+    assert report.trashed == 1  # 前半の 1 通は本当にゴミ箱へ行っている
+    assert report.routes[0].trash_error is not None
+    assert set(inbox.messages) == {2}
+    assert len(trash.messages) == 1
