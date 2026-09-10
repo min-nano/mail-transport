@@ -7,6 +7,9 @@ on:
   # deploy.yml からデプロイ前のゲートとして呼ばれる
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
