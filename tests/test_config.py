@@ -10,7 +10,7 @@ from mailtransport.config import Route, load_config
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     for name in list(dict(__import__("os").environ)):
-        if name.startswith(("ICLOUD_", "GMAIL_", "ROUTES", "INITIAL_IMPORT", "DRY_RUN")):
+        if name.startswith(("ICLOUD_", "GMAIL_", "ROUTES", "INITIAL_IMPORT", "DRY_RUN", "TRASH_")):
             monkeypatch.delenv(name, raising=False)
 
 
@@ -32,6 +32,26 @@ def test_defaults_route_inbox_only(monkeypatch):
     # Apple の表示どおり空白入りで貼られても通るようにする
     assert config.icloud_app_password == "abcdefghijklmnop"
     assert config.icloud_host == "imap.mail.me.com"
+
+
+def test_forwarded_mail_is_trashed_by_default(monkeypatch):
+    """iCloud の容量を空けるため、既定では転送後にゴミ箱へ移す."""
+    base_env(monkeypatch)
+    config = load_config()
+
+    assert config.trash_after_forward is True
+    # ゴミ箱の名前もロケール依存 (Trash / Deleted Messages) なのでフラグで探す
+    assert config.trash_mailbox == r"\Trash"
+
+
+def test_trashing_can_be_turned_off_and_retargeted(monkeypatch):
+    base_env(monkeypatch)
+    monkeypatch.setenv("TRASH_AFTER_FORWARD", "false")
+    monkeypatch.setenv("TRASH_MAILBOX", "Archive")
+    config = load_config()
+
+    assert config.trash_after_forward is False
+    assert config.trash_mailbox == "Archive"
 
 
 def test_routes_can_be_overridden(monkeypatch):

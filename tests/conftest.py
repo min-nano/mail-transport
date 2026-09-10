@@ -17,6 +17,8 @@ def make_config(**overrides) -> Config:
         gmail_auth=GmailAuth(client_id="cid", client_secret="cs", refresh_token="rt"),
         gmail_user_id="me",
         routes=(Route("INBOX", ("INBOX",)),),
+        trash_after_forward=True,
+        trash_mailbox="\\Trash",
         project_id="proj",
         seen_retention_days=30,
         max_messages_per_run=40,
@@ -74,7 +76,9 @@ class FakeImapSource:
         self.mailboxes = mailboxes
         self.special_use = special_use or {}
         self.selected: FakeMailbox | None = None
+        self.readonly = True
         self.fetched: list[int] = []
+        self.moved: list[tuple[list[int], str]] = []
         self.closed = False
 
     def __enter__(self):
@@ -88,8 +92,9 @@ class FakeImapSource:
             return self.special_use.get(source)
         return source if source in self.mailboxes else None
 
-    def select(self, mailbox: str) -> tuple[int, int]:
+    def select(self, mailbox: str, readonly: bool = True) -> tuple[int, int]:
         self.selected = self.mailboxes[mailbox]
+        self.readonly = readonly
         return self.selected.uidvalidity, self.selected.uidnext
 
     def search_uids_after(self, last_uid: int) -> list[int]:
@@ -105,6 +110,23 @@ class FakeImapSource:
         self.fetched.append(uid)
         entry = self.selected.messages.get(uid)
         return entry[1] if entry else None
+
+    def move_uids(self, uids: list[int], destination: str) -> int:
+        assert self.selected is not None
+        if self.readonly:
+            raise AssertionError("読み取り専用で SELECT したまま移動しようとしています")
+        if destination not in self.mailboxes:
+            raise KeyError(destination)
+        target = self.mailboxes[destination]
+        moved = 0
+        for uid in uids:
+            entry = self.selected.messages.pop(uid, None)
+            if entry is None:
+                continue
+            target.add(target.uidnext, entry[1], entry[0].flags)
+            moved += 1
+        self.moved.append((list(uids), destination))
+        return moved
 
 
 class FakeGmail:

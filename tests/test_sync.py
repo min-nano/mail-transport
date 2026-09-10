@@ -11,11 +11,16 @@ from mailtransport.sync import dedupe_key, state_key, sync_once
 def make_source(inbox_msgs=(), junk_msgs=()):
     inbox = FakeMailbox("INBOX")
     junk = FakeMailbox("Junk")
+    trash = FakeMailbox("Deleted Messages")
     for uid, raw, flags in inbox_msgs:
         inbox.add(uid, raw, flags)
     for uid, raw, flags in junk_msgs:
         junk.add(uid, raw, flags)
-    source = FakeImapSource({"INBOX": inbox, "Junk": junk}, special_use={r"\Junk": "Junk"})
+    source = FakeImapSource(
+        {"INBOX": inbox, "Junk": junk, "Deleted Messages": trash},
+        special_use={r"\Junk": "Junk", r"\Trash": "Deleted Messages"},
+    )
+    source.trash = trash
     return source, inbox, junk
 
 
@@ -274,3 +279,126 @@ def test_state_key_is_a_safe_document_id():
     key = state_key("you@icloud.com", "迷惑メール/古い")
     assert "/" not in key and len(key) <= 120
     assert key != state_key("you@icloud.com", "INBOX")
+
+
+def test_forwarded_mail_is_moved_to_trash(store):
+    """転送が済んだメールは iCloud の受信トレイに残さない (容量を空けるため)."""
+    config = make_config()
+    source, inbox, _ = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)  # ブートストラップ
+
+    inbox.add(1, build_raw("<new@x>"))
+    inbox.add(2, build_raw("<new2@x>"), flags=(r"\Seen",))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 2
+    assert report.trashed == 2
+    assert report.routes[0].trash_error is None
+    assert inbox.messages == {}
+    # 中身はゴミ箱に移っているだけで、消えてはいない
+    assert [raw for _, raw in source.trash.messages.values()] == [
+        build_raw("<new@x>"),
+        build_raw("<new2@x>"),
+    ]
+    # 移動は 1 コマンドにまとめる
+    assert source.moved == [([1, 2], "Deleted Messages")]
+
+
+def test_trash_move_needs_a_writable_selection(store):
+    """ゴミ箱へ移す設定のときは読み書き可能な SELECT にする."""
+    config = make_config()
+    source, inbox, _ = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    run(config, store, source, gmail)
+
+    assert source.readonly is False
+
+
+def test_trash_after_forward_can_be_disabled(store):
+    """TRASH_AFTER_FORWARD=false なら iCloud 側は読み取り専用のまま触らない."""
+    config = make_config(trash_after_forward=False)
+    source, inbox, _ = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.trashed == 0
+    assert source.readonly is True
+    assert source.moved == []
+    assert set(inbox.messages) == {1}
+
+
+def test_only_forwarded_mail_is_trashed(store):
+    """転送していないメール (サイズ超過・取り込み済み) は受信トレイに残す."""
+    config = make_config(max_message_bytes=200)
+    source, inbox, _ = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    dup = build_raw("<dup@x>")
+    inbox.add(1, dup)
+    run(config, store, source, gmail)  # 1 通目を転送してゴミ箱へ
+
+    inbox.add(2, build_raw("<big@x>", body="x" * 500))  # サイズ超過
+    inbox.add(3, dup)  # 取り込み済み (Message-ID が同じ)
+    inbox.add(4, build_raw("<ok@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.routes[0].skipped_too_large == 1
+    assert report.routes[0].duplicates == 1
+    assert report.trashed == 1
+    assert set(inbox.messages) == {2, 3}
+
+
+def test_trash_failure_does_not_fail_the_forward(store):
+    """ゴミ箱へ移せなくても転送は成功扱い. 次回に再送しないため."""
+    config = make_config(trash_mailbox=r"\Trash")
+    inbox = FakeMailbox("INBOX")
+    source = FakeImapSource({"INBOX": inbox}, special_use={})  # ゴミ箱が見つからない
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.failed is False
+    assert report.trashed == 0
+    assert "ゴミ箱が見つかりません" in report.routes[0].trash_error
+    assert set(inbox.messages) == {1}
+
+
+def test_trash_runs_even_when_a_later_message_fails(store):
+    """途中で挿入に失敗しても、転送できたぶんはゴミ箱へ移す."""
+    config = make_config()
+    source, inbox, _ = make_source()
+    gmail = FakeGmail(fail_on={1})  # 2 通目で失敗させる
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<ok@x>"))
+    inbox.add(2, build_raw("<ng@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.routes[0].error is not None
+    assert report.trashed == 1
+    assert set(inbox.messages) == {2}
+
+
+def test_dry_run_does_not_move_anything(store):
+    config = make_config(dry_run=True, initial_import="all")
+    source, inbox, _ = make_source(inbox_msgs=[(1, build_raw("<a@x>"), ())])
+    gmail = FakeGmail()
+
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.trashed == 0
+    assert source.readonly is True
+    assert set(inbox.messages) == {1}

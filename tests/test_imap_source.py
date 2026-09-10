@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from mailtransport.imap_source import (
+    ImapError,
     ImapSource,
     Mailbox,
     _parse_internaldate,
@@ -15,8 +18,9 @@ from mailtransport.imap_source import (
 class FakeConn:
     """imaplib.IMAP4_SSL の応答を模したテスト用コネクション."""
 
-    def __init__(self, responses: dict) -> None:
+    def __init__(self, responses: dict, capabilities: tuple[str, ...] = ()) -> None:
         self.responses = responses
+        self.capabilities = capabilities
         self.calls: list[tuple] = []
 
     def list(self):
@@ -27,9 +31,11 @@ class FakeConn:
         return self.responses[command.upper()]
 
 
-def source_with(conn) -> ImapSource:
+def source_with(conn, readonly: bool = True) -> ImapSource:
     source = ImapSource("h", 993, "u", "p")
     source._conn = conn
+    source._selected = "INBOX"
+    source._selected_readonly = readonly
     return source
 
 
@@ -140,3 +146,118 @@ def test_internaldate_parser_rejects_garbage():
 
 def test_mailbox_flag_comparison_is_case_insensitive():
     assert Mailbox("Junk", (r"\junk",)).has_flag(r"\Junk") is True
+
+
+def test_move_uids_prefers_the_move_command():
+    conn = FakeConn({"MOVE": ("OK", [b"done"])}, capabilities=("IMAP4rev1", "MOVE", "UIDPLUS"))
+
+    moved = source_with(conn, readonly=False).move_uids([10, 12], "Deleted Messages")
+
+    assert moved == 2
+    assert conn.calls == [("MOVE", ("10,12", '"Deleted Messages"'))]
+
+
+def test_move_uids_falls_back_to_copy_and_expunge():
+    """MOVE 非対応のサーバーでは COPY してから元を削除する."""
+    conn = FakeConn(
+        {"COPY": ("OK", [b""]), "STORE": ("OK", [b""]), "EXPUNGE": ("OK", [b""])},
+        capabilities=("IMAP4rev1", "UIDPLUS"),
+    )
+
+    moved = source_with(conn, readonly=False).move_uids([10], "Trash")
+
+    assert moved == 1
+    assert [command for command, _ in conn.calls] == ["COPY", "STORE", "EXPUNGE"]
+    assert conn.calls[1][1] == ("10", "+FLAGS", r"(\Deleted)")
+    # 他のクライアントが立てた \Deleted を巻き込まないよう UID 指定で消す
+    assert conn.calls[2][1] == ("10",)
+
+
+def test_move_uids_skips_expunge_without_uidplus():
+    """UID 指定で消せないなら、素の EXPUNGE は撃たずにコピーだけで止める."""
+    conn = FakeConn({"COPY": ("OK", [b""]), "STORE": ("OK", [b""])}, capabilities=("IMAP4rev1",))
+
+    assert source_with(conn, readonly=False).move_uids([10], "Trash") == 1
+    assert [command for command, _ in conn.calls] == ["COPY", "STORE"]
+
+
+def test_move_uids_splits_long_uid_lists():
+    conn = FakeConn({"MOVE": ("OK", [b""])}, capabilities=("MOVE",))
+
+    moved = source_with(conn, readonly=False).move_uids(list(range(1, 451)), "Trash")
+
+    assert moved == 450
+    assert len(conn.calls) == 3  # 200 + 200 + 50
+
+
+def test_move_uids_refuses_a_readonly_selection():
+    conn = FakeConn({}, capabilities=("MOVE",))
+
+    with pytest.raises(ImapError):
+        source_with(conn).move_uids([10], "Trash")
+    assert conn.calls == []
+
+
+def test_move_uids_does_nothing_without_uids():
+    conn = FakeConn({}, capabilities=("MOVE",))
+
+    assert source_with(conn, readonly=False).move_uids([], "Trash") == 0
+    assert conn.calls == []
+
+
+def test_move_uids_raises_when_the_server_says_no():
+    conn = FakeConn({"MOVE": ("NO", [b"over quota"])}, capabilities=("MOVE",))
+
+    with pytest.raises(ImapError):
+        source_with(conn, readonly=False).move_uids([10], "Trash")
+
+
+class FakeSSLConn:
+    """login 後にしか全機能を明かさないサーバーの模倣."""
+
+    def __init__(self, host, port, timeout=None):
+        self.capabilities = ("IMAP4REV1", "IDLE")
+        self.logged_in = None
+        self.capability_error = False
+
+    def login(self, user, password):
+        self.logged_in = (user, password)
+        return ("OK", [b"LOGIN completed"])
+
+    def capability(self):
+        if self.capability_error:
+            raise OSError("接続が切れました")
+        assert self.logged_in is not None
+        return ("OK", [b"IMAP4rev1 IDLE MOVE UIDPLUS"])
+
+
+def connect_with(monkeypatch, prepare=None) -> ImapSource:
+    def factory(host, port, timeout=None):
+        conn = FakeSSLConn(host, port, timeout)
+        if prepare:
+            prepare(conn)
+        return conn
+
+    monkeypatch.setattr("mailtransport.imap_source.imaplib.IMAP4_SSL", factory)
+    source = ImapSource("imap.mail.me.com", 993, "u", "p")
+    source.connect()
+    return source
+
+
+def test_connect_refreshes_capabilities_after_login(monkeypatch):
+    """imaplib は認証前の CAPABILITY しか持たないので取り直す.
+
+    MOVE / UIDPLUS を認証後にしか出さないサーバーがあり、取り直さないと
+    ゴミ箱への移動が非効率な経路に落ちてしまう。
+    """
+    source = connect_with(monkeypatch)
+
+    assert source.has_capability("MOVE") is True
+    assert source.has_capability("UIDPLUS") is True
+
+
+def test_connect_keeps_going_when_capability_fails(monkeypatch):
+    source = connect_with(monkeypatch, prepare=lambda conn: setattr(conn, "capability_error", True))
+
+    assert source.has_capability("IDLE") is True  # 接続時のものを使い続ける
+    assert source.has_capability("MOVE") is False

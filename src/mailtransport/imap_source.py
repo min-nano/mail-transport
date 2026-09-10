@@ -33,6 +33,9 @@ _BYE_RE = re.compile(rb"^\*\s+BYE\b", re.IGNORECASE)
 # IDLE 終了時に読み捨てる未応答レスポンスの上限 (無限ループ防止)
 _MAX_IDLE_DRAIN_LINES = 1000
 
+# 1 コマンドに並べる UID の上限。行が長くなりすぎるサーバーを避けるため分割する。
+_MAX_UIDS_PER_COMMAND = 200
+
 
 class ImapError(RuntimeError):
     pass
@@ -106,6 +109,7 @@ class ImapSource:
         self._timeout = timeout
         self._conn: imaplib.IMAP4_SSL | None = None
         self._selected: str | None = None
+        self._selected_readonly = True
 
     # --- 接続 ---------------------------------------------------------------
     def __enter__(self) -> ImapSource:
@@ -125,7 +129,23 @@ class ImapSource:
                 "iCloud への IMAP ログインに失敗しました。"
                 "Apple ID とアプリ用パスワード (App-Specific Password) を確認してください"
             ) from exc
+        self._refresh_capabilities()
         log.info("iCloud IMAP に接続しました", extra={"extra_fields": {"host": self._host}})
+
+    def _refresh_capabilities(self) -> None:
+        """ログイン後の CAPABILITY を取り直す.
+
+        imaplib は接続直後 (認証前) の CAPABILITY しか覚えていない。サーバーは
+        認証後にしか見せない機能があるため、MOVE / UIDPLUS の有無を正しく
+        判定するには取り直す必要がある。
+        """
+        conn = self.conn
+        try:
+            typ, data = conn.capability()
+            if typ == "OK" and data and data[-1]:
+                conn.capabilities = tuple(_decode(data[-1]).upper().split())
+        except Exception:  # pragma: no cover - 取れなければ接続時のものを使う
+            log.debug("CAPABILITY を取り直せませんでした", exc_info=True)
 
     def close(self) -> None:
         conn, self._conn = self._conn, None
@@ -133,11 +153,17 @@ class ImapSource:
             return
         try:
             if self._selected:
-                conn.close()
+                # 読み書きで SELECT していると CLOSE は \Deleted のメールを消してしまう。
+                # 他のクライアントが立てたフラグまで巻き込まないよう UNSELECT を優先する。
+                if not self._selected_readonly and _has_capability(conn, "UNSELECT"):
+                    conn.unselect()
+                else:
+                    conn.close()
         except Exception:  # pragma: no cover - 切断時のエラーは無視してよい
             pass
         finally:
             self._selected = None
+            self._selected_readonly = True
             try:
                 conn.logout()
             except Exception:  # pragma: no cover
@@ -188,14 +214,17 @@ class ImapSource:
                 return mailbox.name
         return None
 
-    def select(self, mailbox: str) -> tuple[int, int]:
-        """読み取り専用で SELECT し ``(uidvalidity, uidnext)`` を返す.
+    def select(self, mailbox: str, readonly: bool = True) -> tuple[int, int]:
+        """SELECT し ``(uidvalidity, uidnext)`` を返す.
 
-        readonly にすることで iCloud 側の既読フラグを変化させない。
+        既定の読み取り専用では iCloud 側を一切変更しない。転送後にゴミ箱へ
+        移す場合だけ ``readonly=False`` にする (MOVE には書き込み権限が要る)。
+        本文の取得は常に ``BODY.PEEK[]`` なので、どちらでも既読にはならない。
         """
-        typ, data = self.conn.select(quote_mailbox(mailbox), readonly=True)
+        typ, data = self.conn.select(quote_mailbox(mailbox), readonly=readonly)
         self._check(typ, data, f"SELECT {mailbox}")
         self._selected = mailbox
+        self._selected_readonly = readonly
         uidvalidity = self._response_int("UIDVALIDITY")
         uidnext = self._response_int("UIDNEXT")
         return uidvalidity, uidnext
@@ -264,10 +293,48 @@ class ImapSource:
         log.warning("UID %s の本文を取得できませんでした (削除された可能性)", uid)
         return None
 
+    # --- 移動 (転送後の後始末) ----------------------------------------------
+    def move_uids(self, uids: list[int], destination: str) -> int:
+        """``uids`` を ``destination`` へ移し、移せた通数を返す.
+
+        転送済みのメールを iCloud のゴミ箱へ送って容量を空けるために使う。
+        RFC 6851 の ``UID MOVE`` があればそれを使い、無ければ COPY してから
+        元を削除する。書き込み可能な状態で SELECT していること。
+        """
+        if not uids:
+            return 0
+        if self._selected_readonly:
+            raise ImapError("読み取り専用で SELECT しているためメールを移動できません")
+
+        moved = 0
+        target = quote_mailbox(destination)
+        supports_move = self.has_capability("MOVE")
+        for chunk in _chunk(uids, _MAX_UIDS_PER_COMMAND):
+            uid_set = ",".join(str(uid) for uid in chunk)
+            if supports_move:
+                typ, data = self.conn.uid("MOVE", uid_set, target)
+                self._check(typ, data, f"UID MOVE -> {destination}")
+            else:
+                typ, data = self.conn.uid("COPY", uid_set, target)
+                self._check(typ, data, f"UID COPY -> {destination}")
+                typ, data = self.conn.uid("STORE", uid_set, "+FLAGS", r"(\Deleted)")
+                self._check(typ, data, r"UID STORE (\Deleted)")
+                if self.has_capability("UIDPLUS"):
+                    typ, data = self.conn.uid("EXPUNGE", uid_set)
+                    self._check(typ, data, "UID EXPUNGE")
+                else:
+                    # 素の EXPUNGE は他のクライアントが \Deleted を立てたメールまで
+                    # 消してしまう。コピーは済んでいるので削除は行わない。
+                    log.warning(
+                        "UIDPLUS が無いため削除を見送りました "
+                        "(ゴミ箱にコピー済み、元は \\Deleted のまま残ります)"
+                    )
+            moved += len(chunk)
+        return moved
+
     # --- IDLE (push 受信) ---------------------------------------------------
     def has_capability(self, name: str) -> bool:
-        capabilities = getattr(self.conn, "capabilities", ()) or ()
-        return name.upper() in {str(c).upper() for c in capabilities}
+        return _has_capability(self.conn, name)
 
     def idle_wait(self, timeout: float, poll_step: float = 30.0) -> bool:
         """IDLE で新着を待ち、通知が来たら True、時間切れなら False を返す.
@@ -330,6 +397,16 @@ class ImapSource:
             if not line or line.startswith(tag):
                 return
         raise ImapError("IDLE の終了応答を受け取れませんでした")
+
+
+def _has_capability(conn, name: str) -> bool:
+    capabilities = getattr(conn, "capabilities", ()) or ()
+    return name.upper() in {str(c).upper() for c in capabilities}
+
+
+def _chunk(values: list[int], size: int):
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 def _parse_internaldate(raw: bytes) -> dt.datetime | None:
