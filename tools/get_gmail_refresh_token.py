@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="ブラウザを自動起動せず URL を表示するだけにする",
     )
-    parser.add_argument("--out", help="結果 JSON の書き出し先 (省略時は標準出力)")
+    parser.add_argument("--out", required=True, help="結果 JSON の書き出し先")
     args = parser.parse_args(argv)
 
     try:
@@ -71,12 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         "token_uri": credentials.token_uri,
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2)
-    if args.out:
-        with open(args.out, "w", encoding="utf-8") as handle:
-            handle.write(text + "\n")
-        print(f"{args.out} に書き出しました (取り扱い注意)", file=sys.stderr)
-    else:
-        print(text)
+    with open(args.out, "w", encoding="utf-8") as handle:
+        handle.write(text + "\n")
+    print(f"{args.out} に書き出しました (取り扱い注意)", file=sys.stderr)
     return 0
 
 
