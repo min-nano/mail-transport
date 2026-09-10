@@ -57,21 +57,21 @@ def test_daemon_forwards_new_mail_and_survives_a_restart(tmp_path):
     run_one_cycle(config, SqliteStateStore(db_path), source, gmail)
     assert gmail.inserted == []
 
-    # 稼働中に新着が届く
+    # 稼働中に新着が届く。迷惑メールは移動対象外なので Gmail には現れない。
     inbox.add(2, build_raw("<new@x>"))
     junk.add(1, build_raw("<spam@x>"), flags=(r"\Seen",))
     run_one_cycle(config, SqliteStateStore(db_path), source, gmail)
 
-    assert [labels for _, labels in gmail.inserted] == [["INBOX", "UNREAD"], ["SPAM"]]
+    assert [labels for _, labels in gmail.inserted] == [["INBOX", "UNREAD"]]
 
     # プロセスを再起動しても、取り込み済みのメールは二度と送られない
     run_one_cycle(config, SqliteStateStore(db_path), source, gmail)
-    assert len(gmail.inserted) == 2
+    assert len(gmail.inserted) == 1
 
     # 再起動後に届いた新着はきちんと転送される
     inbox.add(3, build_raw("<after-restart@x>"))
     run_one_cycle(config, SqliteStateStore(db_path), source, gmail)
-    assert len(gmail.inserted) == 3
+    assert len(gmail.inserted) == 2
     assert gmail.inserted[-1][1] == ["INBOX", "UNREAD"]
 
 

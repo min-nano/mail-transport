@@ -16,7 +16,7 @@ def make_config(**overrides) -> Config:
         icloud_port=993,
         gmail_auth=GmailAuth(client_id="cid", client_secret="cs", refresh_token="rt"),
         gmail_user_id="me",
-        routes=(Route("INBOX", ("INBOX",)), Route(r"\Junk", ("SPAM",))),
+        routes=(Route("INBOX", ("INBOX",)),),
         project_id="proj",
         seen_retention_days=30,
         max_messages_per_run=40,
