@@ -7,6 +7,15 @@ on:
   # deploy.yml からデプロイ前のゲートとして呼ばれる
   workflow_call:
 
+# GITHUB_TOKEN に渡す権限を明示する。書かないとリポジトリの既定 (設定に
+# よっては書き込みを含む) がそのまま入り、必要より広いトークンで走る
+# (CodeQL の Workflow does not contain permissions)。
+# ここでするのはコードを読んで確かめることだけなので contents: read で足りる。
+# deploy.yml から workflow_call で呼ばれる場合も、呼び出し元より広くは
+# ならないため、どちらの経路でも読み取りに限られる。
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
