@@ -100,9 +100,18 @@ def test_secret_file_is_owner_only(tmp_path, fake_oauth):
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX の権限ビットが無い環境では確認しない")
 def test_existing_loose_file_is_tightened(tmp_path, fake_oauth):
+    """他人にも読める既存ファイルへ上書きするときも権限を絞り直す."""
     out = tmp_path / "gmail_oauth.json"
-    out.write_text("old\n", encoding="utf-8")
-    os.chmod(out, 0o644)
+    # 以前の実行が通常の umask で残したファイル (0644 相当) を用意する。
+    # chmod に緩いモードを直接渡すと、テスト自身が「他人に読めるファイルを
+    # 作るコード」として CodeQL に検出されるため、既定の open() 経由で作る。
+    previous = os.umask(0o022)
+    try:
+        out.write_text("old\n", encoding="utf-8")
+    finally:
+        os.umask(previous)
+    if not stat.S_IMODE(out.stat().st_mode) & 0o077:
+        pytest.skip("この環境では所有者以外に読める既存ファイルを用意できない")
 
     assert main(["--client-secret", "cs.json", "--out", str(out)]) == 0
 
