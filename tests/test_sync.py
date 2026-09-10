@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import FakeGmail, FakeImapSource, FakeMailbox, build_raw, make_config
+from conftest import (
+    FakeGmail,
+    FakeImapSource,
+    FakeMailbox,
+    LegacyFakeGmail,
+    build_raw,
+    make_config,
+)
 from mailtransport.config import Route
 from mailtransport.imap_source import ImapError
 from mailtransport.state import MailboxState
@@ -437,3 +444,350 @@ def test_partially_moved_mail_is_counted(store):
     assert report.routes[0].trash_error is not None
     assert set(inbox.messages) == {2}
     assert len(trash.messages) == 1
+
+
+# --- Gmail 側の確認 (#21) ------------------------------------------------
+
+
+def test_forwarded_mail_is_verified_before_being_trashed(store):
+    """iCloud の原本を消す前に、Gmail から読み戻せることを確かめる."""
+    config = make_config()
+    source, inbox, _ = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    report = run(config, store, source, gmail)
+
+    assert gmail.verified == ["gm1"]
+    assert report.routes[0].verified == 1
+    assert report.trashed == 1
+    assert inbox.messages == {}
+
+
+def test_unverified_mail_stays_in_icloud(store):
+    """insert が成功しても Gmail で見つからなければ原本を残す.
+
+    ゴミ箱は 30 日で空になるので、確認できないまま移すと Gmail 側に
+    無かったときに復元できない (#21)。
+    """
+    config = make_config()
+    source, inbox, _ = make_source()
+    gmail = FakeGmail(lose={"gm1"})
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.trashed == 0
+    assert report.unverified == 1
+    assert set(inbox.messages) == {1}
+    leftovers = store.list_leftovers()
+    assert [(row.uid, row.reason) for row in leftovers] == [(1, "unverified")]
+
+
+def test_verification_failure_leaves_only_the_affected_mail(store):
+    """確認できたぶんは片付け、できなかったぶんだけ残す."""
+    config = make_config()
+    source, inbox, _ = make_source()
+    gmail = FakeGmail(lose={"gm2"})
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    inbox.add(2, build_raw("<b@x>"))
+    inbox.add(3, build_raw("<c@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 3
+    assert report.trashed == 2
+    assert report.unverified == 1
+    assert set(inbox.messages) == {2}
+
+
+def test_verification_can_be_turned_off(store):
+    config = make_config(verify_before_trash="off")
+    source, inbox, _ = make_source()
+    gmail = FakeGmail(lose={"gm1"})
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    report = run(config, store, source, gmail)
+
+    assert gmail.verified == []
+    assert report.trashed == 1
+    assert inbox.messages == {}
+
+
+def test_verification_is_skipped_when_not_trashing(store):
+    """iCloud 側に触らないなら確認する必要もない (API 呼び出しを増やさない)."""
+    config = make_config(trash_after_forward=False)
+    source, inbox, _ = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    run(config, store, source, gmail)
+
+    assert gmail.verified == []
+
+
+def test_auto_mode_keeps_working_without_the_metadata_scope(store):
+    """既存のトークン (insert のみ) でも、警告だけ出して従来どおり動く."""
+    config = make_config(verify_before_trash="auto")
+    source, inbox, _ = make_source()
+    gmail = LegacyFakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.trashed == 1
+    assert report.unverified == 0
+    assert inbox.messages == {}
+
+
+def test_force_mode_keeps_mail_without_the_metadata_scope(store):
+    """VERIFY_BEFORE_TRASH=true なら、確認できない以上は原本を消さない."""
+    config = make_config(verify_before_trash="force")
+    source, inbox, _ = make_source()
+    gmail = LegacyFakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.trashed == 0
+    assert report.unverified == 1
+    assert set(inbox.messages) == {1}
+
+
+def test_scope_error_is_only_reported_once(store):
+    """スコープ不足は再試行しても直らないので、毎通は問い合わせない."""
+    from mailtransport.gmail_sink import GmailScopeError
+
+    config = make_config(verify_before_trash="auto")
+    source, inbox, _ = make_source()
+    gmail = FakeGmail(verify_error=GmailScopeError("スコープが足りません", status=403))
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    inbox.add(2, build_raw("<b@x>"))
+    report = run(config, store, source, gmail)
+
+    assert gmail.verified == ["gm1"]  # 1 通目で諦め、以降は問い合わせない
+    assert report.trashed == 2
+
+
+def test_transient_verification_error_keeps_the_original(store):
+    """一時的な失敗でも、確認できていない以上は原本を残す (次回は触らない)."""
+    from mailtransport.gmail_sink import GmailError
+
+    config = make_config()
+    source, inbox, _ = make_source()
+    gmail = FakeGmail(verify_error=GmailError("一時的な失敗", status=503))
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.trashed == 0
+    assert set(inbox.messages) == {1}
+
+
+# --- 初回の全件取り込み (#22) --------------------------------------------
+
+
+def test_initial_import_does_not_trash_existing_mail(store):
+    """稼働開始前からあったメールは、転送しても受信トレイから消さない.
+
+    Gmail 側に全部入ったことを人が確認する前に受信トレイが空になると、
+    ラベル設定のミスに気付いたときには手遅れになる (#22)。
+    """
+    config = make_config(initial_import="all")
+    source, inbox, _ = make_source(
+        inbox_msgs=[(1, build_raw("<a@x>"), ()), (2, build_raw("<b@x>"), ())]
+    )
+    gmail = FakeGmail()
+
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 2
+    assert report.trashed == 0
+    assert report.routes[0].kept_pre_existing == 2
+    assert set(inbox.messages) == {1, 2}
+    assert {row.reason for row in store.list_leftovers()} == {"pre_existing"}
+
+
+def test_mail_arriving_after_the_initial_import_is_trashed(store):
+    """境界より後に届いたメールは、これまでどおりゴミ箱へ移す."""
+    config = make_config(initial_import="all")
+    source, inbox, _ = make_source(inbox_msgs=[(1, build_raw("<old@x>"), ())])
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(2, build_raw("<new@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.trashed == 1
+    assert set(inbox.messages) == {1}
+
+
+def test_existing_mail_can_be_trashed_on_request(store):
+    config = make_config(initial_import="all", trash_existing_on_initial_import=True)
+    source, inbox, _ = make_source(inbox_msgs=[(1, build_raw("<a@x>"), ())])
+    gmail = FakeGmail()
+
+    report = run(config, store, source, gmail)
+
+    assert report.trashed == 1
+    assert inbox.messages == {}
+
+
+# --- 受信トレイへ戻したメール (#24) --------------------------------------
+
+
+def test_mail_moved_back_to_the_inbox_is_not_forwarded_again(store):
+    """利用者が受信トレイへ戻したメールを再転送・再ゴミ箱行きにしない.
+
+    IMAP では戻すと新しい UID が振られるので新着と区別が付かない。
+    重複排除の記録を無期限に保つことで、二重取り込みを防ぐ (#24)。
+    """
+    config = make_config()
+    source, inbox, _ = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    raw = build_raw("<again@x>")
+    inbox.add(1, raw)
+    run(config, store, source, gmail)
+    assert inbox.messages == {}
+
+    inbox.add(5, raw)  # 利用者がゴミ箱から受信トレイへ戻した
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 0
+    assert report.routes[0].duplicates == 1
+    assert report.trashed == 0
+    assert set(inbox.messages) == {5}  # 戻した操作を打ち消さない
+
+
+# --- 経路ごとのゴミ箱設定 (#26) ------------------------------------------
+
+
+def test_route_can_opt_out_of_trashing(store):
+    """Gmail 側でも 30 日で消えるラベルの経路だけ、iCloud に原本を残せる."""
+    config = make_config(
+        routes=(Route("INBOX", ("INBOX",)), Route(r"\Junk", ("SPAM",), trash=False))
+    )
+    source, inbox, junk = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    junk.add(1, build_raw("<spam@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 2
+    assert report.trashed == 1
+    assert inbox.messages == {}
+    assert set(junk.messages) == {1}
+
+
+def test_route_can_opt_in_to_trashing(store):
+    config = make_config(
+        trash_after_forward=False, routes=(Route("INBOX", ("INBOX",), trash=True),)
+    )
+    source, inbox, _ = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.trashed == 1
+    assert inbox.messages == {}
+
+
+# --- iCloud に残るメールの可視化 (#25) -----------------------------------
+
+
+def test_leftovers_record_why_mail_stayed_in_icloud(store):
+    """受信トレイを手で整理する前に、残った理由を確かめられるようにする."""
+    config = make_config(max_message_bytes=200)
+    source, inbox, _ = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    dup = build_raw("<dup@x>")
+    inbox.add(1, dup)
+    run(config, store, source, gmail)
+
+    inbox.add(2, build_raw("<big@x>", body="x" * 500))
+    inbox.add(3, dup)
+    run(config, store, source, gmail)
+
+    by_uid = {row.uid: row for row in store.list_leftovers()}
+    assert by_uid[2].reason == "too_large"
+    assert by_uid[2].mailbox == "INBOX"
+    assert by_uid[3].reason == "duplicate"
+
+
+def test_trash_failure_is_recorded_as_a_leftover(store):
+    config = make_config()
+    inbox = FakeMailbox("INBOX")
+    source = FakeImapSource({"INBOX": inbox}, special_use={})  # ゴミ箱が見つからない
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    run(config, store, source, gmail)
+
+    assert [(row.uid, row.reason) for row in store.list_leftovers()] == [(1, "trash_failed")]
+
+
+class ForgetfulSource(FakeImapSource):
+    """FETCH の応答に一部の UID が出てこないサーバー."""
+
+    def fetch_metadata(self, uids):
+        return super().fetch_metadata(uids)[1:]
+
+
+def test_uids_missing_from_the_fetch_response_are_recorded(store):
+    """応答から漏れた UID を黙って捨てない (同期位置は先へ進むため)."""
+    config = make_config()
+    inbox, trash = FakeMailbox("INBOX"), FakeMailbox("Deleted Messages")
+    source = ForgetfulSource(
+        {"INBOX": inbox, "Deleted Messages": trash},
+        special_use={r"\Trash": "Deleted Messages"},
+    )
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<lost@x>"))
+    inbox.add(2, build_raw("<ok@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.routes[0].missing_metadata == 1
+    assert [(row.uid, row.reason) for row in store.list_leftovers()] == [(1, "metadata_missing")]
+
+
+def test_leftovers_are_dropped_when_uidvalidity_changes(store):
+    """UID の意味が変われば、UID で覚えていた記録も捨てる."""
+    config = make_config()
+    source, inbox, _ = make_source()
+    gmail = FakeGmail(lose={"gm1"})
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<a@x>"))
+    run(config, store, source, gmail)
+    assert store.list_leftovers()
+
+    inbox.uidvalidity = 999
+    run(config, store, source, gmail)
+
+    assert store.list_leftovers() == []

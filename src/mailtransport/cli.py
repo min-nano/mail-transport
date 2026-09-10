@@ -30,11 +30,28 @@ def _load_env_file(path: str) -> None:
             os.environ.setdefault(name.strip(), value)
 
 
+def _print_leftovers(path: str) -> int:
+    """転送されずに iCloud へ残ったメールを一覧する."""
+    from mailtransport.state import SqliteStateStore
+
+    if not os.path.exists(path):
+        log.error("状態ファイルが見つかりません: %s (STATE_DB_PATH で指定できます)", path)
+        return 2
+    rows = [row.to_dict() for row in SqliteStateStore(path).list_leftovers()]
+    print(json.dumps(rows, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="iCloud から Gmail へメールを転送する")
     parser.add_argument("--env-file", default=".env", help="読み込む環境変数ファイル")
     parser.add_argument("--dry-run", action="store_true", help="転送も状態保存も行わない")
     parser.add_argument("--loop", type=int, default=0, help="指定秒間隔で繰り返す (0 で 1 回のみ)")
+    parser.add_argument(
+        "--leftovers",
+        action="store_true",
+        help="転送されずに iCloud に残っているメールを一覧して終了する",
+    )
     parser.add_argument(
         "--daemon",
         action="store_true",
@@ -46,6 +63,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         os.environ["DRY_RUN"] = "true"
     setup_logging()
+
+    if args.leftovers:
+        # 受信トレイを手で整理する前に、Gmail に無いメールが混じっていないか見る。
+        # 状態ファイルを読むだけなので、Gmail や iCloud の資格情報は要らない。
+        return _print_leftovers(os.environ.get("STATE_DB_PATH") or "./state.db")
 
     from mailtransport.config import load_config
     from mailtransport.state import build_state_store

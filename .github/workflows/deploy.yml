@@ -18,7 +18,11 @@ on:
   workflow_dispatch:
     inputs:
       initial_import:
-        description: "既存メールの扱い (none: 稼働後のみ / all: 既存も全部)"
+        description: >-
+          既存メールの扱い (none: 稼働後のみ / all: 既存も全部)。
+          all は iCloud の受信トレイを全件 Gmail へ転送します。転送しても
+          稼働開始前からあったメールは iCloud に残るので、Gmail 側の件数を
+          確認してから手で整理してください
         type: choice
         options: [none, all]
         default: none

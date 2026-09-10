@@ -20,6 +20,17 @@ DEFAULT_ROUTES: list[dict] = [
     {"source": "INBOX", "labels": ["INBOX"]},
 ]
 
+# Gmail が 30 日で自動削除するラベル。iCloud のゴミ箱移動と重なると
+# 両方からメールが消えるため、起動時に警告する。
+SELF_EXPIRING_LABELS = {"SPAM", "TRASH"}
+
+# ゴミ箱へ移す前に Gmail 側を読み戻して確認するかどうか。
+#   auto  : 確認できるなら確認する。トークンに gmail.metadata が無ければ
+#           1 度警告して従来どおり移す (再認可なしでも動き続ける)
+#   force : 必ず確認する。確認できないメールは iCloud に残す
+#   off   : 確認しない
+VERIFY_AUTO, VERIFY_FORCE, VERIFY_OFF = "auto", "force", "off"
+
 
 def _env(name: str, default: str | None = None) -> str | None:
     value = os.environ.get(name)
@@ -69,11 +80,18 @@ class Route:
 
     source: str
     labels: tuple[str, ...]
+    # None なら TRASH_AFTER_FORWARD に従う。経路ごとに上書きできるのは、
+    # Gmail 側でも自動削除されるラベル (SPAM / TRASH) へ入れる経路だけ
+    # iCloud に原本を残す、といった使い分けのため。
+    trash: bool | None = None
 
     @property
     def is_special_use(self) -> bool:
         """``\\Junk`` のような IMAP 特殊用途フラグ指定かどうか."""
         return self.source.startswith("\\")
+
+    def trashes(self, default: bool) -> bool:
+        return default if self.trash is None else self.trash
 
 
 @dataclass(frozen=True)
@@ -95,6 +113,8 @@ class Config:
     routes: tuple[Route, ...]
     trash_after_forward: bool
     trash_mailbox: str
+    verify_before_trash: str
+    trash_existing_on_initial_import: bool
     project_id: str | None
     seen_retention_days: int
     max_messages_per_run: int
@@ -136,8 +156,48 @@ def _parse_routes() -> tuple[Route, ...]:
             labels = [labels]
         if not labels:
             raise ValueError(f"ROUTES の {entry['source']!r} に labels がありません")
-        routes.append(Route(source=str(entry["source"]), labels=tuple(str(x) for x in labels)))
+        trash = entry.get("trash")
+        if trash is not None and not isinstance(trash, bool):
+            raise ValueError(f"ROUTES の {entry['source']!r} の trash は真偽値で指定してください")
+        routes.append(
+            Route(
+                source=str(entry["source"]),
+                labels=tuple(str(x) for x in labels),
+                trash=trash,
+            )
+        )
     return tuple(routes)
+
+
+def warn_self_expiring_routes(routes: tuple[Route, ...], trash_after_forward: bool) -> None:
+    """両側とも 30 日で消える組み合わせを起動時に警告する.
+
+    Gmail の ``SPAM`` / ``TRASH`` は 30 日で自動削除される。iCloud のゴミ箱も
+    30 日で空になるため、この 2 つを組み合わせるとどちらにもコピーが残らない。
+    """
+    for route in routes:
+        risky = sorted({label.upper() for label in route.labels} & SELF_EXPIRING_LABELS)
+        if not risky or not route.trashes(trash_after_forward):
+            continue
+        log.warning(
+            "経路 %s は Gmail 側でも 30 日で自動削除されるラベルを付けつつ "
+            "iCloud の原本もゴミ箱へ移します。30 日後にどちらにも残りません "
+            '(残したい場合は ROUTES の当該経路に "trash": false を足してください)',
+            route.source,
+            extra={"extra_fields": {"source": route.source, "labels": risky}},
+        )
+
+
+def _parse_verify_mode() -> str:
+    """``VERIFY_BEFORE_TRASH`` を解釈する. 真偽値表記も受け付ける."""
+    raw = (_env("VERIFY_BEFORE_TRASH", VERIFY_AUTO) or VERIFY_AUTO).strip().lower()
+    if raw in {"auto"}:
+        return VERIFY_AUTO
+    if raw in {"1", "true", "yes", "on", "force", "require"}:
+        return VERIFY_FORCE
+    if raw in {"0", "false", "no", "off"}:
+        return VERIFY_OFF
+    raise ValueError("VERIFY_BEFORE_TRASH は 'auto' / 'true' / 'false' を指定してください")
 
 
 def _parse_gmail_auth() -> GmailAuth:
@@ -209,6 +269,10 @@ def load_config() -> Config:
     if state_backend not in {"sqlite", "memory"}:
         raise ValueError("STATE_BACKEND は 'sqlite' か 'memory' を指定してください")
 
+    routes = _parse_routes()
+    trash_after_forward = _env_bool("TRASH_AFTER_FORWARD", True)
+    warn_self_expiring_routes(routes, trash_after_forward)
+
     return Config(
         icloud_username=username,
         # アプリ用パスワードは Apple の表示に合わせて空白入りで貼られることが多い
@@ -217,12 +281,18 @@ def load_config() -> Config:
         icloud_port=_env_int("ICLOUD_IMAP_PORT", 993),
         gmail_auth=_parse_gmail_auth(),
         gmail_user_id=_env("GMAIL_USER_ID", "me"),
-        routes=_parse_routes(),
+        routes=routes,
         # 転送が終わったメールは iCloud に残さない (容量を空けるため)
-        trash_after_forward=_env_bool("TRASH_AFTER_FORWARD", True),
+        trash_after_forward=trash_after_forward,
         trash_mailbox=_env("TRASH_MAILBOX", r"\Trash"),
+        # ゴミ箱へ移すのは Gmail から読み戻せたメールだけにする
+        verify_before_trash=_parse_verify_mode(),
+        # 稼働開始前から iCloud にあったメールは、既定ではゴミ箱へ移さない
+        trash_existing_on_initial_import=_env_bool("TRASH_EXISTING_ON_INITIAL_IMPORT", False),
         project_id=_env("GOOGLE_CLOUD_PROJECT") or _env("GCP_PROJECT"),
-        seen_retention_days=_env_int("SEEN_RETENTION_DAYS", 30),
+        # 0 で無期限。期限切れで転送済みの記録が消えると、利用者が受信トレイへ
+        # 戻したメールが再転送され、再びゴミ箱へ移されてしまう。
+        seen_retention_days=_env_int("SEEN_RETENTION_DAYS", 0),
         max_messages_per_run=_env_int("MAX_MESSAGES_PER_RUN", 40),
         # iCloud の送受信上限は 20MB 前後。Gmail insert は 50MB まで受け付ける。
         max_message_bytes=_env_int("MAX_MESSAGE_BYTES", 35 * 1024 * 1024),

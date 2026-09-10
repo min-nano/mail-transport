@@ -118,7 +118,7 @@ Apple ID のパスワード本体を使うより権限が限定され、いつ�
    - User Type: **外部** (個人の Gmail の場合)
    - **公開ステータスを「本番環境」にする**
      - 「テスト」のままだと**リフレッシュトークンが 7 日で失効します**
-     - `gmail.insert` は制限付きスコープのため未確認アプリの警告が出ますが、
+     - `gmail.insert` / `gmail.metadata` は制限付きスコープのため未確認アプリの警告が出ますが、
        自分が作ったアプリを自分のアカウントで使う分には「詳細」→「移動」で続行できます
 2. 「認証情報」→「OAuth クライアント ID を作成」→ 種別 **デスクトップ アプリ**
 3. JSON をダウンロード
@@ -131,8 +131,21 @@ python tools/get_gmail_refresh_token.py \
   --out deploy/gmail_oauth.json
 ```
 
-要求するスコープは `https://www.googleapis.com/auth/gmail.insert` **のみ**です。
-メールの閲覧・変更・削除・送信の権限は一切要求しません。
+要求するスコープは次の 2 つ**だけ**です。メールの本文の閲覧・変更・削除・送信の
+権限は一切要求しません。
+
+| スコープ | 用途 |
+|---|---|
+| `gmail.insert` | メールを Gmail に入れる |
+| `gmail.metadata` | 入れたメールを ID で引き直し、**本当に入ったかを確認する** |
+
+`gmail.metadata` は ID・ラベル・ヘッダーしか読めず、本文と添付は取得できません。
+これは iCloud の原本をゴミ箱へ移す前の確認に使います (第 5 章
+「Gmail 側の確認」)。
+
+> **すでに `gmail.insert` だけでトークンを発行している場合**、そのままでも動きます
+> (確認できない旨の警告が 1 度出て、従来どおりゴミ箱へ移します)。上のコマンドで
+> トークンを取り直して Secret Manager を更新すると、確認が有効になります。
 
 `--out` は必須です。出力される JSON には client secret とリフレッシュトークンが
 入るため、端末やシェルの履歴・ログに残る標準出力へは出さず、所有者だけが読める
@@ -346,6 +359,8 @@ Actions タブから手動実行 (`workflow_dispatch`) もでき、そのとき
 | `INITIAL_IMPORT` | `none` | `none`: 稼働後のメールのみ / `all`: 既存メールも全部 |
 | `TRASH_AFTER_FORWARD` | `true` | 転送が済んだメールを iCloud のゴミ箱へ移す。`false` で iCloud 側に触らない |
 | `TRASH_MAILBOX` | `\Trash` | 移動先。特殊用途フラグかメールボックス名 |
+| `VERIFY_BEFORE_TRASH` | `auto` | ゴミ箱へ移す前に Gmail 側を読み戻して確認する。`auto` / `true` / `false` |
+| `TRASH_EXISTING_ON_INITIAL_IMPORT` | `false` | `INITIAL_IMPORT=all` で取り込んだ既存メールもゴミ箱へ移す |
 | `STATE_BACKEND` | `sqlite` | `sqlite` (ファイル) / `memory` (テスト用) |
 | `STATE_DB_PATH` | `./state.db` | 状態ファイルの場所 (VM では `/var/lib/mail-transport/state.db`) |
 | `IDLE_ENABLED` | `true` | `false` で IDLE を使わず定期ポーリングにする |
@@ -356,7 +371,7 @@ Actions タブから手動実行 (`workflow_dispatch`) もでき、そのとき
 | `MAX_MESSAGES_PER_RUN` | `40` | 1 回の同期で処理する上限 |
 | `RUN_BUDGET_SECONDS` | `240` | 1 回の同期の時間上限。超えたら次回に持ち越す |
 | `MAX_MESSAGE_BYTES` | `36700160` (35MiB) | これを超えるメールはスキップ |
-| `SEEN_RETENTION_DAYS` | `30` | 重複排除レコードの保持日数 |
+| `SEEN_RETENTION_DAYS` | `0` | 重複排除レコードの保持日数。`0` で無期限 |
 | `LOCK_TTL_SECONDS` | `540` | 多重起動防止ロックの有効期間 |
 | `DRY_RUN` | `false` | `true` で挿入も状態保存も行わない |
 | `LOG_LEVEL` | `INFO` | ログレベル |
@@ -377,6 +392,9 @@ Gmail に持ち込まず、iCloud の迷惑メールフォルダに残します�
   `迷惑メール` だったりするため、フラグ指定のほうが確実です。
 - `labels` — Gmail のラベル ID。`INBOX` / `SPAM` / `STARRED` などのシステムラベル、
   またはユーザーラベルの ID (`Label_123` 形式)。
+- `trash` (省略可) — その経路だけ `TRASH_AFTER_FORWARD` を上書きします。
+  Gmail 側でも自動削除されるラベルへ入れる経路で `false` にすると、iCloud に
+  原本が残ります。
 
 未読・スター状態は iCloud 側の `\Seen` / `\Flagged` から自動で引き継がれるので、
 `UNREAD` / `STARRED` を `labels` に書く必要はありません。
@@ -386,7 +404,7 @@ Gmail に持ち込まず、iCloud の迷惑メールフォルダに残します�
 ```json
 [
   {"source": "INBOX",   "labels": ["INBOX"]},
-  {"source": "\\Junk",  "labels": ["SPAM"]},
+  {"source": "\\Junk",  "labels": ["SPAM"], "trash": false},
   {"source": "Archive", "labels": ["Label_1234567890"]}
 ]
 ```
@@ -394,14 +412,21 @@ Gmail に持ち込まず、iCloud の迷惑メールフォルダに残します�
 `\Junk` を足すと、迷惑メールは Gmail でも迷惑メールのまま届きます
 (`insert` はスパム分類器を通さないので、指定したラベルがそのまま付きます)。
 
+> **`SPAM` / `TRASH` ラベルと `TRASH_AFTER_FORWARD=true` の組み合わせに注意。**
+> Gmail は `SPAM` と `TRASH` のメールを 30 日で自動削除します。iCloud のゴミ箱も
+> 30 日で空になるため、両方を組み合わせると**どちらにもコピーが残りません**。
+> 迷惑メールなら許容できても、誤判定された正規のメールも同じ経路で消えます。
+> 上の例のように `"trash": false` を書けば iCloud 側に原本が残ります。
+> この組み合わせになっていると、起動時に警告ログが出ます。
+
 ### 転送後にゴミ箱へ移す (`TRASH_AFTER_FORWARD`)
 
 Gmail への取り込みが済んだメールは、既定で **iCloud のゴミ箱へ移します**。
 iCloud の無料枠は 5GB しかなく、複製した実体を両側に残すとすぐ埋まるためです。
 
-- 移動するのは **この実行で Gmail に入れられたメールだけ**です。サイズ超過で
-  スキップしたもの、取り込み済みと判定したもの、まだ転送していないものは
-  受信トレイに残ります。
+- 移動するのは **この実行で Gmail に入れられ、Gmail 側で存在を確認できたメールだけ**
+  です。サイズ超過でスキップしたもの、取り込み済みと判定したもの、まだ転送して
+  いないものは受信トレイに残ります。
 - 移動は 1 通ずつではなく、その回の転送が終わってから **まとめて 1 コマンド**で
   行います (`UID MOVE`。非対応のサーバーでは `UID COPY` + `UID EXPUNGE`)。
 - **移動に失敗しても転送は成功扱い**です。Gmail 側には入っているので、失敗を理由に
@@ -414,9 +439,42 @@ iCloud の無料枠は 5GB しかなく、複製した実体を両側に残す�
 ゴミ箱に入れた時点では容量はまだ解放されません。**iCloud はゴミ箱を 30 日で
 自動的に空にします**。すぐに空けたい場合は iCloud 側でゴミ箱を空にしてください。
 
-iCloud にも原本を残したい場合は `TRASH_AFTER_FORWARD=false` にします。この場合
-iCloud のメールボックスは読み取り専用 (`EXAMINE`) で開くため、既読フラグを含めて
-一切変更しません。
+#### 30 日後は Gmail が唯一のコピーになります
+
+既定のままだと、転送から 30 日が過ぎた時点で **iCloud 側に原本は残りません**。
+そのあと Gmail 側で何かが起きた場合 (誤操作による削除、アカウントの停止、
+容量超過など)、このツールに復元する手段はありません。**片側だけのコピーで
+構わないかを決めたうえで使ってください。**
+
+両側に残したい場合は次のいずれかにします。
+
+- `TRASH_AFTER_FORWARD=false` — iCloud 側に一切触らない (読み取り専用で開く)。
+  そのぶん iCloud の容量は減りません
+- `TRASH_MAILBOX` に**自動削除されないフォルダ名**を指定する — 例えば
+  `TRASH_MAILBOX=Forwarded` にすると、転送済みのメールは受信トレイから
+  そのフォルダへ移るだけで消えません。容量の整理は手動になります
+
+### Gmail 側の確認 (`VERIFY_BEFORE_TRASH`)
+
+`insert` の応答は「Gmail が受け付けた」ことしか示しません。iCloud の原本を
+消す前にそれだけを根拠にするのは心もとないので、**挿入したメールを ID で
+引き直し、実際に Gmail から読み出せることを確かめてから**ゴミ箱へ移します
+(`users.messages.get` を `format=minimal` で呼ぶだけなので、本文も添付も
+ダウンロードしません)。
+
+確認できなかったメールは**ゴミ箱へ移さず iCloud に残します**。転送そのものは
+成功扱いなので再送はされません (`Message-ID` で重複排除されます)。残った
+メールは警告ログと `mail-transport --leftovers` で確認できます (第 8 章)。
+
+| 値 | 挙動 |
+|---|---|
+| `auto` (既定) | 確認できるなら確認する。トークンに `gmail.metadata` が無ければ 1 度警告して従来どおり移す |
+| `true` | 必ず確認する。確認できないメールは iCloud に残す |
+| `false` | 確認しない (従来どおり) |
+
+`auto` は、`gmail.insert` だけでトークンを発行した既存のデプロイをそのまま
+動かし続けるための逃げ道です。**トークンを取り直したら `true` にする**のが
+安全側の設定になります (第 2-2 章)。
 
 ---
 
@@ -433,7 +491,9 @@ iCloud のメールボックスは読み取り専用 (`EXAMINE`) で開くため
 7. **重複排除** — `Message-ID` (なければ本文ハッシュ) で取り込み済みか確認
 8. **`users.messages.insert`** — 元の `Date` ヘッダーを Gmail の日時に採用して挿入
 9. **同期位置の更新** — **1 通ごとに**保存。途中で落ちても取りこぼし・二重取り込みを防ぐ
-10. **`UID MOVE` でゴミ箱へ** — 転送できたぶんをまとめて iCloud のゴミ箱に移す
+10. **読み戻して確認** — 挿入したメールを ID で引き直し、Gmail に確かに入ったことを
+    確かめる (`VERIFY_BEFORE_TRASH`)
+11. **`UID MOVE` でゴミ箱へ** — 確認できたぶんをまとめて iCloud のゴミ箱に移す
     (`TRASH_AFTER_FORWARD=true` のときだけ)
 
 処理は「成功したところまで進める」設計です。ある 1 通の挿入に失敗した場合、
@@ -450,6 +510,22 @@ iCloud のメールボックスは読み取り専用 (`EXAMINE`) で開くため
 `MAX_MESSAGES_PER_RUN` ずつ処理されるので、通数によっては数時間かかります。
 取り込みが終わったら `none` に戻しておくと、将来 UIDVALIDITY が変わったときの
 再取り込みを防げます。
+
+**初回取り込みの対象になったメールは、転送してもゴミ箱へ移しません。**
+初回同期の時点で iCloud にあった UID の上限 (`import_floor`) を状態に記録し、
+それ以下のメールは iCloud の受信トレイに残します。数時間かけて受信トレイが
+空になったあとで「ラベルの指定を間違えていた」と気付いても取り返しがつかない
+ためです。
+
+手順としてはこうなります:
+
+1. `INITIAL_IMPORT=all` で流し、ログの `forwarded` が増えなくなるまで待つ
+2. **Gmail 側で件数とラベルを確認する**
+3. 問題なければ iCloud の受信トレイを手で整理する
+   (自動で移したい場合は `TRASH_EXISTING_ON_INITIAL_IMPORT=true` で流し直す)
+4. `INITIAL_IMPORT` を `none` に戻す
+
+`import_floor` より後に届いた新着メールは、これまでどおり転送後にゴミ箱へ移ります。
 
 ---
 
@@ -531,6 +607,48 @@ PYTHONPATH=src python -m mailtransport.cli
 
 # 常駐して IDLE で待ち受ける (Ctrl-C で停止)
 PYTHONPATH=src python -m mailtransport.cli --daemon
+
+# 転送されずに iCloud に残っているメールを一覧する
+PYTHONPATH=src python -m mailtransport.cli --leftovers
+```
+
+### iCloud に残っているメールを確認する
+
+受信トレイに残るのは「まだ転送していないメール」だけとは限りません。次のものは
+**Gmail に入らないまま iCloud に残ります**。
+
+| 理由 (`reason`) | 内容 |
+|---|---|
+| `too_large` | `MAX_MESSAGE_BYTES` を超えるメール |
+| `duplicate` | 重複排除で取り込み済みと判定されたメール (利用者が受信トレイへ戻したものを含む) |
+| `fetch_failed` | 本文を取得できなかった (取得中に別のクライアントが消したなど) |
+| `metadata_missing` | `FETCH` の応答に UID が出てこなかった |
+| `unverified` | Gmail に入れたが、読み戻して確認できなかった |
+| `trash_failed` | 転送は済んだがゴミ箱へ移せなかった |
+| `pre_existing` | `INITIAL_IMPORT=all` で取り込んだ、稼働開始前からあったメール |
+
+これらは UID と理由が状態ファイルに記録されます。**iCloud の受信トレイを手で
+空にする前に**、一覧して中身を確認してください。
+
+状態ファイルを読むだけなので、Gmail や iCloud の資格情報は要りません。
+
+```bash
+gcloud compute ssh mail-transport --zone=us-west1-b --command='
+  sudo -u mailtransport STATE_DB_PATH=/var/lib/mail-transport/state.db \
+    /opt/mail-transport/venv/bin/python -m mailtransport.cli --leftovers'
+```
+
+```json
+[
+  {
+    "key": "you_icloud.com__INBOX__1a2b3c4d5e6f7890",
+    "uid": 1204,
+    "mailbox": "INBOX",
+    "reason": "too_large",
+    "detail": "41943040",
+    "recorded_at": "2026-09-10T12:34:56.789012+00:00"
+  }
+]
 ```
 
 ### テスト
@@ -870,12 +988,16 @@ checkout を 2 つに分け、`ref` を動的に渡すのをやめました。
 | `メールボックスが見つかりません: ...` | `ROUTES` の `source` が iCloud 側に無い。`\Junk` を足した直後なら、迷惑メール判定が一度も無いアカウントでフォルダが未作成なだけのことがある (1 通届けば自動で作られる) |
 | 迷惑メールが Gmail に来ない | 仕様。既定では受信トレイだけを転送する。必要なら `ROUTES` に `\Junk` を足す (第 5 章) |
 | 既存メールが転送されない | 仕様。`INITIAL_IMPORT=all` にする (第 6 章) |
-| iCloud の受信トレイからメールが消える | 仕様。転送済みのメールはゴミ箱へ移す。原本を残したいなら `TRASH_AFTER_FORWARD=false` (第 5 章) |
+| iCloud の受信トレイからメールが消える | 仕様。転送済みのメールはゴミ箱へ移す。原本を残したいなら `TRASH_AFTER_FORWARD=false` か、自動削除されないフォルダを `TRASH_MAILBOX` に指定する (第 5 章) |
+| `Gmail 側の確認ができません` が出る | トークンに `gmail.metadata` が無い。`tools/get_gmail_refresh_token.py` で取り直して Secret Manager を更新する (第 2-2 章)。取り直すまでは従来どおり動く |
+| `転送済みですが iCloud に原本を残します` が出る | Gmail 側で読み戻せなかったメール。転送は済んでいるので再送はされない。`--leftovers` で UID と理由を確認する (第 8 章) |
+| 転送は進むのに iCloud の受信トレイが空にならない | `INITIAL_IMPORT=all` で取り込んだ既存メールはゴミ箱へ移さない仕様 (第 6 章)。Gmail 側を確認してから手で整理するか `TRASH_EXISTING_ON_INITIAL_IMPORT=true` にする |
+| 受信トレイへ戻したメールがまた消える | 転送済みの記録が期限切れになると再転送・再ゴミ箱行きになる。`SEEN_RETENTION_DAYS=0` (無期限、既定) のままにする |
 | `転送済みメールをゴミ箱へ移せませんでした` | ゴミ箱が見つからないか iCloud 側が拒否した。転送自体は成功している。`TRASH_MAILBOX` にフォルダ名を直接指定すると解決することがある |
 | iCloud の容量が減らない | ゴミ箱に入れただけでは解放されない。iCloud は 30 日で自動的に空にする。すぐ空けたいなら iCloud 側でゴミ箱を空にする |
 | 転送が遅い / 即時にならない | ログに「IDLE で新着を待機します」が出ているか確認。出ていなければ `SAFETY_SYNC_SECONDS` 間隔の定期同期にフォールバックしている |
 | `監視接続が切れました` が続く | iCloud 側の一時障害か接続数上限。自動で再接続するが、頻発するなら `IDLE_ENABLED=false` でポーリングに切り替える |
-| 同じメールが 2 通届く | `Message-ID` の無いメールが再取得された可能性。`SEEN_RETENTION_DAYS` を延ばす |
+| 同じメールが 2 通届く | `Message-ID` の無いメールが再取得された可能性。`SEEN_RETENTION_DAYS=0` (無期限) にする |
 | 想定外の課金が出た | ディスクが `pd-standard` か、リージョンが us-west1/us-central1/us-east1 か、VM が 1 台だけかを確認 |
 | CI が `GitHub の Variables / Secrets が未設定です` で落ちる | `deploy/ci/00-setup-wif.sh` の出力どおりに GitHub 側を登録する |
 | CI の SSH が `Permission denied` になる | インスタンス単位の `roles/compute.osAdminLogin` が効かない場合がある。プロジェクトレベルで付与し直す |
@@ -889,10 +1011,26 @@ checkout を 2 つに分け、`ref` を動的に渡すのをやめました。
 - **一方向・追記のみの同期です。** iCloud 側で後からメールを削除・移動・既読化しても
   Gmail には反映されません (取り込み時点の状態が入ります)。
 - **転送済みのメールは iCloud のゴミ箱に移ります** (既定)。ゴミ箱は iCloud が 30 日で
-  自動的に空にするため、それ以降 iCloud 側に原本は残りません。
-  原本を残したい場合は `TRASH_AFTER_FORWARD=false` にしてください。
+  自動的に空にするため、**それ以降は Gmail が唯一のコピーになります**。そのあと
+  Gmail 側で削除・アカウント停止・容量超過などが起きても、このツールに復元する
+  手段はありません。両側に残したい場合は `TRASH_AFTER_FORWARD=false` にするか、
+  自動削除されないフォルダを `TRASH_MAILBOX` に指定してください (第 5 章)。
+- ゴミ箱へ移すのは、Gmail から読み戻して存在を確認できたメールだけです
+  (`VERIFY_BEFORE_TRASH`)。ただし確認できるのは**その時点で Gmail にあること**
+  だけで、その後の Gmail 側の障害までは防げません。
 - ゴミ箱への移動に失敗したメールは iCloud に残ります。転送は済んでいるので
   再送はされません (警告ログと `trash_error` に記録されます)。
+- **転送されずに iCloud に残るメールがあります** (サイズ超過・重複判定・
+  取得失敗・確認失敗など)。受信トレイを手で空にする前に
+  `mail-transport --leftovers` で一覧してください (第 8 章)。
+- **利用者が iCloud で受信トレイへ戻したメールは、新着として再び処理対象に
+  なります** (IMAP では移動すると新しい UID が振られるため)。既定では重複排除の
+  記録が無期限なので再転送もゴミ箱移動もされませんが、`SEEN_RETENTION_DAYS` に
+  期限を設定すると、期限切れ後は再転送されて再びゴミ箱へ移ります。
+- **`ROUTES` の `labels` に `SPAM` / `TRASH` を指定すると Gmail 側でも 30 日で
+  自動削除されます。** ゴミ箱移動と組み合わせると両方から消えるため、経路ごとに
+  `"trash": false` を指定してください (第 5 章)。ラベル ID 自体の妥当性は検証
+  していません。
 - 対象は `ROUTES` に書いたメールボックスのみです。既定では受信トレイだけで、
   迷惑メール・送信済み・下書き・アーカイブは対象外です。
 - **受信後に iCloud 側で迷惑メールへ移されたメールは、すでに転送済みなら Gmail に

@@ -19,8 +19,33 @@ from typing import Protocol
 log = logging.getLogger(__name__)
 
 
+# ``mark_seen`` の保持日数が 0 以下のときに使う期限。重複排除の記録を
+# 消さないことで、利用者が受信トレイへ戻したメールの再転送を防ぐ。
+NEVER_EXPIRES = float("inf")
+
+
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.UTC)
+
+
+@dataclasses.dataclass(frozen=True)
+class Leftover:
+    """転送されずに iCloud 側へ残ったメール 1 通の記録.
+
+    「受信トレイに残っているのは未処理のものだけ」という前提が崩れると、
+    利用者が手で整理した拍子にどこにも無いメールができてしまう。理由付きで
+    残しておき、``--leftovers`` で見られるようにする。
+    """
+
+    key: str
+    uid: int
+    mailbox: str
+    reason: str
+    detail: str | None
+    recorded_at: str
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
 
 
 @dataclasses.dataclass
@@ -33,9 +58,17 @@ class MailboxState:
 
     uidvalidity: int = 0
     last_uid: int = 0
+    # 稼働開始時点で既にメールボックスにあった UID の上限 (INITIAL_IMPORT=all の
+    # ときだけ 0 以外になる)。ここ以下のメールは「利用者が自分で貯めてきたもの」
+    # なので、転送しても既定ではゴミ箱へ移さない。
+    import_floor: int = 0
 
     def to_dict(self) -> dict:
-        return {"uidvalidity": self.uidvalidity, "last_uid": self.last_uid}
+        return {
+            "uidvalidity": self.uidvalidity,
+            "last_uid": self.last_uid,
+            "import_floor": self.import_floor,
+        }
 
     @classmethod
     def from_dict(cls, data: dict | None) -> MailboxState | None:
@@ -44,6 +77,7 @@ class MailboxState:
         return cls(
             uidvalidity=int(data.get("uidvalidity") or 0),
             last_uid=int(data.get("last_uid") or 0),
+            import_floor=int(data.get("import_floor") or 0),
         )
 
 
@@ -62,6 +96,14 @@ class StateStore(Protocol):
 
     def mark_seen(self, key: str, retention_days: int) -> None: ...
 
+    def record_leftover(
+        self, key: str, uid: int, mailbox: str, reason: str, detail: str | None = None
+    ) -> None: ...
+
+    def list_leftovers(self, key: str | None = None, limit: int = 500) -> list[Leftover]: ...
+
+    def clear_leftovers(self, key: str) -> int: ...
+
 
 class MemoryStateStore:
     """テストおよび ``DRY_RUN`` 用のインメモリ実装."""
@@ -70,6 +112,7 @@ class MemoryStateStore:
         self._mailboxes: dict[str, MailboxState] = {}
         self._locks: dict[str, tuple[str, dt.datetime]] = {}
         self._seen: set[str] = set()
+        self._leftovers: dict[tuple[str, int], Leftover] = {}
 
     def get_mailbox_state(self, key: str) -> MailboxState | None:
         state = self._mailboxes.get(key)
@@ -98,6 +141,29 @@ class MemoryStateStore:
 
     def mark_seen(self, key: str, retention_days: int) -> None:
         self._seen.add(key)
+
+    def record_leftover(
+        self, key: str, uid: int, mailbox: str, reason: str, detail: str | None = None
+    ) -> None:
+        self._leftovers[(key, uid)] = Leftover(
+            key=key,
+            uid=uid,
+            mailbox=mailbox,
+            reason=reason,
+            detail=detail,
+            recorded_at=_now().isoformat(),
+        )
+
+    def list_leftovers(self, key: str | None = None, limit: int = 500) -> list[Leftover]:
+        rows = [row for row in self._leftovers.values() if key is None or row.key == key]
+        rows.sort(key=lambda row: (row.recorded_at, row.uid))
+        return rows[:limit]
+
+    def clear_leftovers(self, key: str) -> int:
+        stale = [k for k in self._leftovers if k[0] == key]
+        for k in stale:
+            del self._leftovers[k]
+        return len(stale)
 
 
 def new_holder_id() -> str:
@@ -145,10 +211,11 @@ class SqliteStateStore:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS mailbox_state (
-                    key         TEXT PRIMARY KEY,
-                    uidvalidity INTEGER NOT NULL,
-                    last_uid    INTEGER NOT NULL,
-                    updated_at  TEXT NOT NULL
+                    key          TEXT PRIMARY KEY,
+                    uidvalidity  INTEGER NOT NULL,
+                    last_uid     INTEGER NOT NULL,
+                    updated_at   TEXT NOT NULL,
+                    import_floor INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS locks (
                     name       TEXT PRIMARY KEY,
@@ -160,31 +227,67 @@ class SqliteStateStore:
                     expire_at  REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS seen_expire_at ON seen (expire_at);
+                CREATE TABLE IF NOT EXISTS leftovers (
+                    key         TEXT NOT NULL,
+                    uid         INTEGER NOT NULL,
+                    mailbox     TEXT NOT NULL,
+                    reason      TEXT NOT NULL,
+                    detail      TEXT,
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY (key, uid)
+                );
+                CREATE INDEX IF NOT EXISTS leftovers_recorded_at
+                    ON leftovers (recorded_at);
                 """
+            )
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """既存の state.db を新しい列に合わせる.
+
+        VM を作り直さずに更新できるよう、足りない列だけを後から足す。
+        """
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(mailbox_state)")}
+        if "import_floor" not in columns:
+            conn.execute(
+                "ALTER TABLE mailbox_state ADD COLUMN import_floor INTEGER NOT NULL DEFAULT 0"
             )
 
     # --- メールボックス状態 -------------------------------------------------
     def get_mailbox_state(self, key: str) -> MailboxState | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT uidvalidity, last_uid FROM mailbox_state WHERE key = ?", (key,)
+                "SELECT uidvalidity, last_uid, import_floor FROM mailbox_state WHERE key = ?",
+                (key,),
             ).fetchone()
         if row is None:
             return None
-        return MailboxState(uidvalidity=int(row["uidvalidity"]), last_uid=int(row["last_uid"]))
+        return MailboxState(
+            uidvalidity=int(row["uidvalidity"]),
+            last_uid=int(row["last_uid"]),
+            import_floor=int(row["import_floor"] or 0),
+        )
 
     def put_mailbox_state(self, key: str, state: MailboxState) -> None:
         with self._write_lock, self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO mailbox_state (key, uidvalidity, last_uid, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO mailbox_state
+                    (key, uidvalidity, last_uid, updated_at, import_floor)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET
-                    uidvalidity = excluded.uidvalidity,
-                    last_uid    = excluded.last_uid,
-                    updated_at  = excluded.updated_at
+                    uidvalidity  = excluded.uidvalidity,
+                    last_uid     = excluded.last_uid,
+                    updated_at   = excluded.updated_at,
+                    import_floor = excluded.import_floor
                 """,
-                (key, state.uidvalidity, state.last_uid, _now().isoformat()),
+                (
+                    key,
+                    state.uidvalidity,
+                    state.last_uid,
+                    _now().isoformat(),
+                    state.import_floor,
+                ),
             )
 
     # --- ロック -------------------------------------------------------------
@@ -227,7 +330,10 @@ class SqliteStateStore:
         return row is not None
 
     def mark_seen(self, key: str, retention_days: int) -> None:
-        expire_at = (_now() + dt.timedelta(days=retention_days)).timestamp()
+        if retention_days <= 0:
+            expire_at = NEVER_EXPIRES
+        else:
+            expire_at = (_now() + dt.timedelta(days=retention_days)).timestamp()
         with self._write_lock, self._connect() as conn:
             conn.execute(
                 """
@@ -238,9 +344,57 @@ class SqliteStateStore:
             )
 
     def purge_expired(self) -> int:
-        """期限切れの重複排除レコードを削除する (常駐プロセスが定期的に呼ぶ)."""
+        """期限切れの重複排除レコードを削除する (常駐プロセスが定期的に呼ぶ).
+
+        ``expire_at`` が無期限 (inf) のレコードはここで消えない。
+        """
         with self._write_lock, self._connect() as conn:
             cursor = conn.execute("DELETE FROM seen WHERE expire_at <= ?", (_now().timestamp(),))
+            return cursor.rowcount or 0
+
+    # --- iCloud に残ったメール ---------------------------------------------
+    def record_leftover(
+        self, key: str, uid: int, mailbox: str, reason: str, detail: str | None = None
+    ) -> None:
+        with self._write_lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO leftovers (key, uid, mailbox, reason, detail, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key, uid) DO UPDATE SET
+                    reason      = excluded.reason,
+                    detail      = excluded.detail,
+                    recorded_at = excluded.recorded_at
+                """,
+                (key, uid, mailbox, reason, detail, _now().isoformat()),
+            )
+
+    def list_leftovers(self, key: str | None = None, limit: int = 500) -> list[Leftover]:
+        sql = "SELECT key, uid, mailbox, reason, detail, recorded_at FROM leftovers"
+        params: list = []
+        if key is not None:
+            sql += " WHERE key = ?"
+            params.append(key)
+        sql += " ORDER BY recorded_at, uid LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            Leftover(
+                key=str(row["key"]),
+                uid=int(row["uid"]),
+                mailbox=str(row["mailbox"]),
+                reason=str(row["reason"]),
+                detail=row["detail"],
+                recorded_at=str(row["recorded_at"]),
+            )
+            for row in rows
+        ]
+
+    def clear_leftovers(self, key: str) -> int:
+        """UIDVALIDITY が変わったときなど、UID の意味が失われたら記録も捨てる."""
+        with self._write_lock, self._connect() as conn:
+            cursor = conn.execute("DELETE FROM leftovers WHERE key = ?", (key,))
             return cursor.rowcount or 0
 
 

@@ -19,8 +19,10 @@ def make_config(**overrides) -> Config:
         routes=(Route("INBOX", ("INBOX",)),),
         trash_after_forward=True,
         trash_mailbox="\\Trash",
+        verify_before_trash="auto",
+        trash_existing_on_initial_import=False,
         project_id="proj",
-        seen_retention_days=30,
+        seen_retention_days=0,
         max_messages_per_run=40,
         max_message_bytes=35 * 1024 * 1024,
         lock_ttl_seconds=540,
@@ -132,15 +134,52 @@ class FakeImapSource:
 
 
 class FakeGmail:
-    def __init__(self, fail_on: set[int] | None = None) -> None:
+    """GmailSink と同じインターフェースを持つテスト用の差し替え.
+
+    ``verify`` は挿入済みのものを引き当てる。``lose`` に入れた ID は
+    「insert は成功したのに Gmail から読み戻せない」状況を再現する。
+    """
+
+    def __init__(
+        self,
+        fail_on: set[int] | None = None,
+        lose: set[str] | None = None,
+        verify_error: Exception | None = None,
+    ) -> None:
         self.inserted: list[tuple[bytes, list[str]]] = []
         self.fail_on = fail_on or set()
+        self.lose = lose or set()
+        self.verify_error = verify_error
+        self.verified: list[str] = []
 
     def insert(self, raw: bytes, label_ids: list[str]):
         from mailtransport.gmail_sink import InsertResult
 
         if len(self.inserted) in self.fail_on:
             raise RuntimeError("Gmail への挿入に失敗しました")
+        self.inserted.append((raw, list(label_ids)))
+        return InsertResult(message_id=f"gm{len(self.inserted)}", thread_id="th1")
+
+    def verify(self, message_id: str):
+        from mailtransport.gmail_sink import VerifyResult
+
+        self.verified.append(message_id)
+        if self.verify_error is not None:
+            raise self.verify_error
+        if message_id in self.lose:
+            return None
+        return VerifyResult(message_id=message_id, label_ids=("INBOX",))
+
+
+class LegacyFakeGmail:
+    """読み戻しに対応しない取り込み先 (``verify`` を持たない)."""
+
+    def __init__(self) -> None:
+        self.inserted: list[tuple[bytes, list[str]]] = []
+
+    def insert(self, raw: bytes, label_ids: list[str]):
+        from mailtransport.gmail_sink import InsertResult
+
         self.inserted.append((raw, list(label_ids)))
         return InsertResult(message_id=f"gm{len(self.inserted)}", thread_id="th1")
 
