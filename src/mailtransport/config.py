@@ -9,13 +9,15 @@ from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
-# iCloud の受信トレイ / 迷惑メールを Gmail のどのラベルへ入れるかの既定マッピング。
+# iCloud のどのメールボックスを Gmail のどのラベルへ入れるかの既定マッピング。
 # Gmail API の messages.insert はスパムフィルタを通さず、ここで指定したラベルが
-# そのまま適用されるため「迷惑メールが消える」ことがない。
+# そのまま適用されるため、受信トレイのメールは受信トレイのまま届く。
+#
+# 迷惑メール (\Junk) は移動対象に含めない。iCloud 側で迷惑メールと判定された
+# ものを Gmail に持ち込んでも読まないため、受信トレイのみを転送する。
+# 必要なら ROUTES に {"source": "\\Junk", "labels": ["SPAM"]} を足せば戻せる。
 DEFAULT_ROUTES: list[dict] = [
     {"source": "INBOX", "labels": ["INBOX"]},
-    # iCloud の迷惑メールは特殊用途フラグ \Junk で自動検出する（名前はロケール依存）。
-    {"source": r"\Junk", "labels": ["SPAM"]},
 ]
 
 

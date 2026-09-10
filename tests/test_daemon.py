@@ -107,10 +107,11 @@ def test_daemon_starts_and_joins_every_watcher():
     stop = threading.Event()
     sync = RecordingSync(stop, stop_after=1)
     watchers: list[FakeWatcher] = []
+    routes = (Route("INBOX", ("INBOX",)), Route("Archive", ("ARCHIVE_X",)))
 
-    run(make_config(**FAST), sync, stop, watchers)
+    run(make_config(routes=routes, **FAST), sync, stop, watchers)
 
-    assert [w.route.source for w in watchers] == ["INBOX", "\\Junk"]
+    assert [w.route.source for w in watchers] == ["INBOX", "Archive"]
     assert all(w.started and w.joined for w in watchers)
     assert stop.is_set()
 
@@ -240,7 +241,7 @@ def test_watcher_treats_a_missing_mailbox_as_a_failure():
     source = FakeIdleSource(mailbox=None)
     watcher, thread = start_watcher(
         make_config(reconnect_backoff_max_seconds=1),
-        Route(r"\Junk", ("SPAM",)),
+        Route(r"\Archive", ("ARCHIVE_X",)),
         source,
         stop,
         trigger,

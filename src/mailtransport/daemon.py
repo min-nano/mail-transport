@@ -26,7 +26,7 @@ class MailboxWatcher(threading.Thread):
     """1 つのメールボックスを監視し、変化があれば ``trigger`` を立てるスレッド.
 
     IMAP は 1 接続につき 1 メールボックスしか SELECT できないので、
-    受信トレイと迷惑メールはそれぞれ別接続で待ち受ける。
+    経路 (ROUTES) ごとに別接続で待ち受ける。既定は受信トレイの 1 本だけ。
     """
 
     def __init__(

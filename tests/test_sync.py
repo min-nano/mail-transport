@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import FakeGmail, FakeImapSource, FakeMailbox, build_raw, make_config
+from mailtransport.config import Route
 from mailtransport.state import MailboxState
 from mailtransport.sync import dedupe_key, state_key, sync_once
 
@@ -51,20 +52,52 @@ def test_initial_import_all_takes_existing_mail(store):
 
 def test_new_mail_is_forwarded_with_correct_labels(store):
     config = make_config()
-    source, inbox, junk = make_source()
+    source, inbox, _ = make_source()
     gmail = FakeGmail()
     run(config, store, source, gmail)  # ブートストラップ
 
     inbox.add(1, build_raw("<new@x>"))  # 未読
     inbox.add(2, build_raw("<read@x>"), flags=(r"\Seen",))
-    junk.add(1, build_raw("<spam@x>"))
     report = run(config, store, source, gmail)
 
-    assert report.forwarded == 3
+    assert report.forwarded == 2
     labels = [labels for _, labels in gmail.inserted]
     assert labels[0] == ["INBOX", "UNREAD"]
     assert labels[1] == ["INBOX"]  # iCloud で既読なら Gmail でも既読
-    assert labels[2] == ["SPAM", "UNREAD"]  # 迷惑メールは迷惑メールのまま
+
+
+def test_junk_mail_is_not_forwarded(store):
+    """迷惑メールは移動対象外. 受信トレイのメールだけを転送する."""
+    config = make_config()
+    source, inbox, junk = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)  # ブートストラップ
+
+    inbox.add(1, build_raw("<new@x>"))
+    junk.add(1, build_raw("<spam@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert [labels for _, labels in gmail.inserted] == [["INBOX", "UNREAD"]]
+    assert [r.source for r in report.routes] == ["INBOX"]
+    # 迷惑メールは開かないので、本文の取得すら行わない
+    assert source.fetched == [1]
+    assert store.get_mailbox_state(state_key("you@icloud.com", "Junk")) is None
+
+
+def test_junk_can_be_added_back_through_routes(store):
+    """必要なら ROUTES で迷惑メールの経路を足せる (既定では入っていない)."""
+    config = make_config(routes=(Route("INBOX", ("INBOX",)), Route(r"\Junk", ("SPAM",))))
+    source, inbox, junk = make_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    inbox.add(1, build_raw("<new@x>"))
+    junk.add(1, build_raw("<spam@x>"))
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 2
+    assert [labels for _, labels in gmail.inserted] == [["INBOX", "UNREAD"], ["SPAM", "UNREAD"]]
 
 
 def test_starred_mail_gets_starred_label(store):
@@ -173,8 +206,8 @@ def test_uidvalidity_change_resets_without_reimporting(store):
     assert store.get_mailbox_state(state_key("you@icloud.com", "INBOX")).uidvalidity == 999
 
 
-def test_missing_junk_mailbox_does_not_break_inbox(store):
-    config = make_config()
+def test_missing_mailbox_does_not_break_the_other_routes(store):
+    config = make_config(routes=(Route("INBOX", ("INBOX",)), Route("Archive", ("ARCHIVE_X",))))
     inbox = FakeMailbox("INBOX")
     source = FakeImapSource({"INBOX": inbox}, special_use={})
     gmail = FakeGmail()
@@ -184,8 +217,8 @@ def test_missing_junk_mailbox_does_not_break_inbox(store):
     report = run(config, store, source, gmail)
 
     assert report.forwarded == 1
-    junk_report = next(r for r in report.routes if r.source == r"\Junk")
-    assert junk_report.error is not None
+    archive_report = next(r for r in report.routes if r.source == "Archive")
+    assert archive_report.error is not None
 
 
 def test_concurrent_run_is_locked_out(store):

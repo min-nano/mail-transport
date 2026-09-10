@@ -23,11 +23,12 @@ def base_env(monkeypatch):
     )
 
 
-def test_defaults_route_inbox_and_junk(monkeypatch):
+def test_defaults_route_inbox_only(monkeypatch):
+    """既定では受信トレイだけを転送し、迷惑メールは対象外にする."""
     base_env(monkeypatch)
     config = load_config()
 
-    assert config.routes == (Route("INBOX", ("INBOX",)), Route(r"\Junk", ("SPAM",)))
+    assert config.routes == (Route("INBOX", ("INBOX",)),)
     # Apple の表示どおり空白入りで貼られても通るようにする
     assert config.icloud_app_password == "abcdefghijklmnop"
     assert config.icloud_host == "imap.mail.me.com"
