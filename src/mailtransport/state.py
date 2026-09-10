@@ -104,6 +104,8 @@ class StateStore(Protocol):
         self, key: str | None = None, limit: int | None = None
     ) -> list[Leftover]: ...
 
+    def clear_leftover(self, key: str, uid: int) -> bool: ...
+
     def clear_leftovers(self, key: str) -> int: ...
 
 
@@ -160,6 +162,9 @@ class MemoryStateStore:
         rows = [row for row in self._leftovers.values() if key is None or row.key == key]
         rows.sort(key=lambda row: (row.recorded_at, row.uid))
         return rows if limit is None else rows[:limit]
+
+    def clear_leftover(self, key: str, uid: int) -> bool:
+        return self._leftovers.pop((key, uid), None) is not None
 
     def clear_leftovers(self, key: str) -> int:
         stale = [k for k in self._leftovers if k[0] == key]
@@ -399,6 +404,12 @@ class SqliteStateStore:
             )
             for row in rows
         ]
+
+    def clear_leftover(self, key: str, uid: int) -> bool:
+        """1 通ぶんの記録を消す (もう iCloud に残っていないと分かったとき)."""
+        with self._write_lock, self._connect() as conn:
+            cursor = conn.execute("DELETE FROM leftovers WHERE key = ? AND uid = ?", (key, uid))
+            return bool(cursor.rowcount)
 
     def clear_leftovers(self, key: str) -> int:
         """UIDVALIDITY が変わったときなど、UID の意味が失われたら記録も捨てる."""

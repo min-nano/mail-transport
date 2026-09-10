@@ -800,6 +800,72 @@ def test_uids_missing_from_the_fetch_response_are_recorded(store):
     assert [(row.uid, row.reason) for row in store.list_leftovers()] == [(1, "metadata_missing")]
 
 
+class FlakyMetadataSource(FakeImapSource):
+    """1 回目だけ FETCH の応答から UID が落ちるサーバー."""
+
+    drop = False
+
+    def fetch_metadata(self, uids):
+        if self.drop:
+            self.drop = False
+            return []
+        return super().fetch_metadata(uids)
+
+
+def make_flaky_source():
+    inbox, trash = FakeMailbox("INBOX"), FakeMailbox("Deleted Messages")
+    source = FlakyMetadataSource(
+        {"INBOX": inbox, "Deleted Messages": trash},
+        special_use={r"\Trash": "Deleted Messages"},
+    )
+    return source, inbox
+
+
+def test_leftover_is_dropped_once_the_mail_is_forwarded_and_trashed(store):
+    """拾い直せた UID の記録を残さない.
+
+    metadata_missing で控えた UID は、次の実行で取得できれば転送される。
+    記録を消さないと ``--leftovers`` が「iCloud に残っている」と言い続け、
+    手で整理する前の確認材料として当てにならなくなる。
+    """
+    config = make_config()
+    source, inbox = make_flaky_source()
+    gmail = FakeGmail()
+    run(config, store, source, gmail)
+
+    source.drop = True
+    inbox.add(1, build_raw("<a@x>"))
+    run(config, store, source, gmail)
+    assert [(row.uid, row.reason) for row in store.list_leftovers()] == [(1, "metadata_missing")]
+
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.trashed == 1
+    assert inbox.messages == {}
+    assert store.list_leftovers() == []
+
+
+def test_leftover_is_re_recorded_when_the_mail_is_kept(store):
+    """拾い直せても iCloud に残すなら、理由を今のものに書き換える."""
+    config = make_config()
+    source, inbox = make_flaky_source()
+    gmail = FakeGmail(lose={"gm1"})
+    run(config, store, source, gmail)
+
+    source.drop = True
+    inbox.add(1, build_raw("<a@x>"))
+    run(config, store, source, gmail)
+    assert [row.reason for row in store.list_leftovers()] == ["metadata_missing"]
+
+    report = run(config, store, source, gmail)
+
+    assert report.forwarded == 1
+    assert report.trashed == 0
+    assert set(inbox.messages) == {1}
+    assert [(row.uid, row.reason) for row in store.list_leftovers()] == [(1, "unverified")]
+
+
 def test_leftovers_are_dropped_when_uidvalidity_changes(store):
     """UID の意味が変われば、UID で覚えていた記録も捨てる."""
     config = make_config()

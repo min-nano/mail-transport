@@ -276,6 +276,9 @@ def _sync_route(
                 store.mark_seen(dkey, config.seen_retention_days)
                 _advance(config, store, key, state, meta.uid)
                 report.forwarded += 1
+                # 前回 metadata_missing として控えた UID を拾い直せた場合など、
+                # 古い理由はもう当てはまらない。残すならこのあと控え直す。
+                _forget_leftover(config, store, key, meta.uid)
                 log.info(
                     "メールを転送しました",
                     extra={
@@ -440,6 +443,17 @@ def _report_missing_metadata(
     )
     for uid in missing:
         _leave_behind(config, store, key, mailbox, uid, REASON_METADATA_MISSING)
+
+
+def _forget_leftover(config: Config, store: StateStore, key: str, uid: int) -> None:
+    """iCloud に残していない、と分かった UID の記録を消す.
+
+    残したままだと ``--leftovers`` が「iCloud に残っている」と言い続け、
+    手で整理する前の確認材料として当てにならなくなる。
+    """
+    if config.dry_run:
+        return
+    store.clear_leftover(key, uid)
 
 
 def _leave_behind(

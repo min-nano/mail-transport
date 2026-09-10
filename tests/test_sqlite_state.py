@@ -174,6 +174,15 @@ def test_leftover_is_updated_not_duplicated(store):
     assert [(row.uid, row.reason) for row in rows] == [(1, "trash_failed")]
 
 
+def test_a_single_leftover_can_be_cleared(store):
+    store.record_leftover("k", 1, "INBOX", "metadata_missing")
+    store.record_leftover("k", 2, "INBOX", "duplicate")
+
+    assert store.clear_leftover("k", 1) is True
+    assert store.clear_leftover("k", 1) is False  # 2 度目は何も消さない
+    assert [row.uid for row in store.list_leftovers("k")] == [2]
+
+
 def test_leftovers_can_be_cleared_per_mailbox(store):
     store.record_leftover("k", 1, "INBOX", "duplicate")
     store.record_leftover("other", 1, "Archive", "duplicate")

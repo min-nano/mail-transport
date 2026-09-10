@@ -55,6 +55,9 @@ def test_leftovers_are_remembered_per_mailbox():
     store.record_leftover("other", 2, "Archive", "too_large")
 
     assert [(row.uid, row.reason) for row in store.list_leftovers("k")] == [(1, "unverified")]
+    assert store.clear_leftover("k", 99) is False
+    assert store.clear_leftover("k", 1) is True
+    store.record_leftover("k", 1, "INBOX", "unverified")
     assert store.clear_leftovers("k") == 1
     assert len(store.list_leftovers()) == 1
 
