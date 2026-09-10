@@ -25,8 +25,13 @@ import json
 import os
 import sys
 
-# 取得するのは「挿入」権限のみ。閲覧・変更・送信の権限は要求しない。
-SCOPES = ["https://www.googleapis.com/auth/gmail.insert"]
+# 取得するのは「挿入」と「メタデータの閲覧」のみ。本文の閲覧・変更・削除・
+# 送信の権限は要求しない。metadata は、挿入したメールを ID で引き直して
+# 「Gmail に確かに入った」と確認するために使う (iCloud の原本を消す前の確認)。
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.insert",
+    "https://www.googleapis.com/auth/gmail.metadata",
+]
 
 # 所有者のみ読み書き。秘密情報を置くファイルの権限。
 _SECRET_FILE_MODE = 0o600

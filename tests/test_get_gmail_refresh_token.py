@@ -47,7 +47,10 @@ def fake_oauth(monkeypatch):
     class InstalledAppFlow:
         @staticmethod
         def from_client_secrets_file(path, scopes):
-            assert scopes == ["https://www.googleapis.com/auth/gmail.insert"]
+            assert scopes == [
+                "https://www.googleapis.com/auth/gmail.insert",
+                "https://www.googleapis.com/auth/gmail.metadata",
+            ]
             return FakeFlow(holder)
 
     package = types.ModuleType("google_auth_oauthlib")
