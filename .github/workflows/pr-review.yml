@@ -152,7 +152,7 @@ jobs:
         # サードパーティの action なのでコミットハッシュで固定する。タグは
         # 付け替えられるため、v1 のままだと中身が黙って変わりうる (CodeQL の
         # 指摘)。更新は Dependabot が # の後ろの版を見て上げてくれる。
-        uses: anthropics/claude-code-action@5ccc3a35a6367cdb8e6fbd0728287467540ecfe2 # v1
+        uses: anthropics/claude-code-action@fd1c128679612beff4ca259c78021c506e8aa7a7 # v1
         env:
           # 何かの経路で環境に残っていても拾われないよう、空で上書きする。
           # 拾われると API のクレジットを別枠で消費しかねない。
